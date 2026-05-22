@@ -14,6 +14,14 @@ const MAX_TASK_OUTPUT_CHARS: usize = 3000;
 /// reasonable session; agents only see ids they themselves spawned.
 const STORE_CAPACITY: usize = 32;
 
+/// Maximum number of *concurrently running* background subagent
+/// tasks (audit M2). Without this cap a misbehaving LLM could spawn
+/// dozens of background tasks in parallel and burn the user's API
+/// budget. Hit by tracking the in-flight JoinHandle count via
+/// `running_count()`; the `task` tool refuses new background spawns
+/// when at-cap with a clear error rather than queueing.
+const MAX_CONCURRENT_SUBAGENTS: usize = 4;
+
 /// Event surfaced on the UI lifecycle channel.
 ///
 /// `Started` fires when the parent spawns a background task; `Finished` fires
@@ -123,6 +131,19 @@ impl BackgroundStore {
     /// Look up the current state of a task without mutating the store.
     pub fn get(&self, id: &str) -> Option<BackgroundTask> {
         self.lock().tasks.get(id).cloned()
+    }
+
+    /// Count of subagent tasks currently in flight. Equal to the
+    /// number of live `JoinHandle`s the store is tracking. Used by
+    /// the `task` tool to refuse a new background spawn when at the
+    /// `MAX_CONCURRENT_SUBAGENTS` cap (audit M2).
+    pub fn running_count(&self) -> usize {
+        self.lock().handles.len()
+    }
+
+    /// Compile-time cap on concurrent subagent spawns.
+    pub fn max_concurrent() -> usize {
+        MAX_CONCURRENT_SUBAGENTS
     }
 
     /// Record a terminal state (Completed or Failed) and queue a notification

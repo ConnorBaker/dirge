@@ -516,9 +516,31 @@ where
             // message if present — retrying before the server's
             // requested wait just earns another 429. Otherwise the
             // exponential-backoff computed delay applies.
+            //
+            // Audit M6: race the sleep against the interject channel.
+            // Previously a bare `sleep(delay).await` made the user
+            // wait the FULL backoff (potentially many seconds for a
+            // 429 with Retry-After) before any Ctrl+C / interjection
+            // could be processed — task.abort() would kill the whole
+            // agent state. Now an interject signal during the wait
+            // exits the retry loop gracefully with `interjected=true`
+            // so the partial response is preserved.
             let delay = policy.backoff_duration_for_msg(attempts, &msg);
-            tokio::time::sleep(delay).await;
-            attempts += 1;
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {
+                    attempts += 1;
+                }
+                _ = interject_rx.recv() => {
+                    // Drain any further pending signals before bailing.
+                    while interject_rx.try_recv().is_ok() {}
+                    let _ = event_tx
+                        .send(AgentEvent::Reasoning(CompactString::new(
+                            "retry cancelled by user".to_string(),
+                        )))
+                        .await;
+                    break;
+                }
+            }
         }
     });
 

@@ -2073,16 +2073,35 @@ impl PluginManager {
                 hook_lit = format!("\"{}\"", escape_janet_string(hook)),
                 fname_lit = format!("\"{}\"", escape_janet_string(name)),
             );
-            if let Ok(s) = self.worker.eval(&code)
-                && let Some(msg) = s.strip_prefix("DIRGE_HOOK_ERR:")
-            {
-                tracing::warn!(
-                    target: "dirge::plugin",
-                    hook = %hook,
-                    function = %name,
-                    error = %msg,
-                    "plugin hook errored — continuing dispatch",
-                );
+            // Audit L6: tighter per-hook timeout than the default
+            // EVAL_TIMEOUT (10 min). A hung `on-tool-start` used to
+            // freeze every subsequent tool call for the full 10 min;
+            // 5s is enough headroom for any reasonable hook (most
+            // execute in < 100 ms) while still recovering quickly
+            // from a plugin stuck in `(while true)` or a blocking
+            // syscall.
+            const HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+            match self.worker.eval_with_timeout(&code, HOOK_TIMEOUT) {
+                Ok(s) => {
+                    if let Some(msg) = s.strip_prefix("DIRGE_HOOK_ERR:") {
+                        tracing::warn!(
+                            target: "dirge::plugin",
+                            hook = %hook,
+                            function = %name,
+                            error = %msg,
+                            "plugin hook errored — continuing dispatch",
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "dirge::plugin",
+                        hook = %hook,
+                        function = %name,
+                        error = %e,
+                        "plugin hook timed out or worker disconnected — continuing dispatch without its result",
+                    );
+                }
             }
 
             // First-wins block check. Peek the slot WITHOUT clearing —

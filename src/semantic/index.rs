@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -10,7 +10,14 @@ const MAX_INDEX_FILES: usize = 2000;
 use crate::semantic::adapters::AdapterRegistry;
 use crate::semantic::types::{ExtractedFile, Symbol, SymbolKind};
 
-type FileCache = HashMap<PathBuf, ExtractedFile>;
+/// Per-file cache. `IndexMap` preserves insertion order so the
+/// LRU-eviction in `ensure_file` can drop the oldest entry by
+/// position. Switched from `HashMap` for audit L14 — the per-file
+/// `ensure_file` path used to insert unconditionally with no cap,
+/// only the bulk `ensure_all` honored `MAX_INDEX_FILES`. A long
+/// session repeatedly inspecting different files in a giant
+/// monorepo grew the cache without bound.
+type FileCache = IndexMap<PathBuf, ExtractedFile>;
 
 pub struct SymbolIndex {
     registry: Arc<AdapterRegistry>,
@@ -21,7 +28,7 @@ impl SymbolIndex {
     pub fn new(registry: Arc<AdapterRegistry>) -> Self {
         Self {
             registry,
-            cache: HashMap::new(),
+            cache: IndexMap::new(),
         }
     }
 
@@ -52,7 +59,26 @@ impl SymbolIndex {
             if let Some(mt) = mtime {
                 extracted.mtime = mt;
             }
+            // Audit L14: LRU-evict the oldest entry before insert if
+            // we're at the cap. Only fires when the path isn't
+            // already in the cache (an in-place refresh keeps the
+            // existing slot and bumps it to most-recent below).
+            if !self.cache.contains_key(&canonical)
+                && self.cache.len() >= MAX_INDEX_FILES
+            {
+                self.cache.shift_remove_index(0);
+            }
             self.cache.insert(canonical.clone(), extracted);
+            // Move the just-touched entry to the most-recent end so
+            // it survives the next eviction. `IndexMap::move_index`
+            // is O(N) worst case but the cache is bounded by
+            // MAX_INDEX_FILES, so this stays fast.
+            if let Some((idx, _, _)) = self.cache.get_full(&canonical) {
+                let last = self.cache.len().saturating_sub(1);
+                if idx != last {
+                    self.cache.move_index(idx, last);
+                }
+            }
         } else {
             // Cache hit — adapter lookup unused, but keep the
             // existing extension-only path so a registry without

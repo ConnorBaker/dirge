@@ -76,6 +76,18 @@ impl Tool for TaskTool {
         let background = args.background.unwrap_or(false);
 
         if background {
+            // Audit M2: refuse new background spawns past the
+            // concurrency cap. The agent gets a clear refusal it
+            // can act on (wait for an existing task to finish, then
+            // retry) rather than fanning out unbounded.
+            let running = self.bg_store.running_count();
+            let cap = BackgroundStore::max_concurrent();
+            if running >= cap {
+                return Err(ToolError::Msg(format!(
+                    "background subagent cap reached ({}/{} in flight). Wait for one to finish (use task_status) or run inline (background=false). Capping prevents fan-out from burning the API budget.",
+                    running, cap,
+                )));
+            }
             let task_id = Uuid::new_v4().to_string();
             self.bg_store.insert(task_id.clone());
             self.bg_store.notify_started(&task_id);

@@ -382,6 +382,44 @@ impl Renderer {
     /// indices) is unaffected.
     fn push_buffer_line(&mut self, entry: LineEntry) {
         self.buffer.push(entry);
+        // Audit M10: scrollback was unbounded. A long session with
+        // verbose tool output (large `grep`, repeated test runs,
+        // streaming logs) could grow `buffer` until it OOM'd the
+        // process. Cap at MAX_SCROLLBACK lines; when exceeded, drop
+        // the oldest in a single drain (cheap relative to the
+        // per-line push cost, and only fires once per overflow
+        // batch). Drain in chunks of MAX/8 so we don't shift on
+        // every push once at-cap. Selection indices use absolute
+        // line positions; adjust selection_start / selection_end /
+        // scroll_offset by the eviction count so the user's
+        // visible state remains anchored to the same content.
+        const MAX_SCROLLBACK: usize = 20_000;
+        const DRAIN_CHUNK: usize = MAX_SCROLLBACK / 8;
+        if self.buffer.len() > MAX_SCROLLBACK {
+            let drop_n = DRAIN_CHUNK;
+            self.buffer.drain(..drop_n);
+            // Adjust absolute line indices used by selection +
+            // scrolling. `lines` field tracks the same counter
+            // used by selection_indices_stay_absolute_under_streaming_appends
+            // — leave it as a count rather than rebasing, but DO
+            // rebase selection so it points at the same surviving
+            // content.
+            let shift = drop_n;
+            if let Some(s) = self.selection_start.as_mut() {
+                s.0 = s.0.saturating_sub(shift);
+            }
+            if let Some(e) = self.selection_end.as_mut() {
+                e.0 = e.0.saturating_sub(shift);
+            }
+            // scroll_offset is measured from the BOTTOM, so eviction
+            // from the front doesn't change it. But if the user was
+            // scrolled into the now-evicted region, clamp.
+            let visible = self.visible_lines();
+            let max_offset = self.buffer.len().saturating_sub(visible);
+            if self.scroll_offset > max_offset {
+                self.scroll_offset = max_offset;
+            }
+        }
         if self.scroll_offset > 0 {
             let visible = self.visible_lines();
             let max_offset = self.buffer.len().saturating_sub(visible);
