@@ -18,24 +18,38 @@ struct ExaResult {
 pub struct WebSearchTool {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
-    /// `Some(key)` → use Exa (paid, high quality, content snippets).
-    /// `None`      → fall back to DuckDuckGo HTML scrape (free, no
-    /// auth, title + URL + short snippet only).
-    /// Match opencode behavior: websearch works out of the box
-    /// without any API key configured.
-    api_key: Option<String>,
+    /// Exa API key (raises rate limits when set; not required).
+    /// Captured at construction so behavior is stable across calls
+    /// — `EXA_API_KEY` env mutations mid-session don't affect a
+    /// long-lived agent.
+    exa_key: Option<String>,
+    /// Parallel.ai API key — same shape and lifecycle as `exa_key`.
+    /// Review #10: previously read per-call via `std::env::var`,
+    /// inconsistent with how `exa_key` was captured.
+    parallel_key: Option<String>,
 }
 
 impl WebSearchTool {
     pub fn new(
         permission: Option<PermCheck>,
         ask_tx: Option<AskSender>,
-        api_key: Option<String>,
+        exa_key: Option<String>,
     ) -> Self {
+        // Trim whitespace-only key strings so a misconfigured env
+        // var (e.g. `EXA_API_KEY="  "`) doesn't produce a
+        // malformed `?exaApiKey=%20%20` URL. (#11 fix.)
+        let exa_key = exa_key
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty());
+        let parallel_key = std::env::var("PARALLEL_API_KEY")
+            .ok()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty());
         Self {
             permission,
             ask_tx,
-            api_key,
+            exa_key,
+            parallel_key,
         }
     }
 }
@@ -84,7 +98,7 @@ impl Tool for WebSearchTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "websearch".to_string(),
-            description: "Search the web. Returns titles, URLs, and snippets. Use for looking up current documentation, API references, or up-to-date information beyond your training cutoff. Backed by Exa when `EXA_API_KEY` is set (richer snippets), otherwise falls back to DuckDuckGo."
+            description: "Search the web. Returns titles, URLs, and snippets. Use for looking up current documentation, API references, or up-to-date information beyond your training cutoff. Works out of the box without any API key — rotates between Exa and Parallel.ai hosted MCP endpoints (50/50 per process, pin with `DIRGE_WEBSEARCH_PROVIDER=exa|parallel`). Optional `EXA_API_KEY` / `PARALLEL_API_KEY` raise the respective rate limits. DuckDuckGo HTML scrape is the last-resort fallback if both upstream MCP endpoints fail."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -130,9 +144,8 @@ impl Tool for WebSearchTool {
         // brief outages; rotating to the other one usually works.
         // DDG is the last-resort defensive fallback so websearch
         // never silently breaks.
-        let exa_key = self.api_key.as_deref();
-        let parallel_key = std::env::var("PARALLEL_API_KEY").ok();
-        let parallel_key = parallel_key.as_deref().filter(|k| !k.is_empty());
+        let exa_key = self.exa_key.as_deref();
+        let parallel_key = self.parallel_key.as_deref();
 
         let primary_result = call_provider(&client, primary, exa_key, parallel_key, &args).await;
         if let Ok(text) = primary_result {
@@ -145,12 +158,17 @@ impl Tool for WebSearchTool {
         if let Ok(text) = secondary_result {
             return Ok(text);
         }
+        let secondary_err = secondary_result.unwrap_err();
 
         // Both upstreams failed → DDG. If even DDG errors, return
-        // the original primary failure for diagnosis.
+        // a CONCATENATED message containing all three failures so
+        // the user can diagnose without chasing the wrong cause
+        // (review #7 — was only `primary_err` before).
         match duckduckgo_search(&client, &args).await {
             Ok(text) => Ok(text),
-            Err(_) => Err(primary_err),
+            Err(ddg_err) => Err(ToolError::Msg(format!(
+                "all websearch backends failed — primary ({primary:?}): {primary_err}; secondary ({secondary:?}): {secondary_err}; ddg: {ddg_err}"
+            ))),
         }
     }
 }
@@ -194,30 +212,40 @@ fn selected_provider() -> Provider {
     }
     use std::sync::atomic::{AtomicU8, Ordering};
     static CHOSEN: AtomicU8 = AtomicU8::new(0); // 0 = uninit, 1 = exa, 2 = parallel
-    match CHOSEN.load(Ordering::Acquire) {
-        1 => Provider::Exa,
-        2 => Provider::Parallel,
-        _ => {
-            // Pick using process+time-derived entropy. We don't pull
-            // in `rand` for this — a one-shot 50/50 from the nanos
-            // is sufficient and zero-dep.
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos())
-                .unwrap_or(0);
-            let pick = if nanos & 1 == 0 {
+    let cur = CHOSEN.load(Ordering::Acquire);
+    if cur == 1 {
+        return Provider::Exa;
+    }
+    if cur == 2 {
+        return Provider::Parallel;
+    }
+    // First call. Pick using process+time-derived entropy. We
+    // don't pull in `rand` for a 50/50 — a one-shot from nanos is
+    // sufficient and zero-dep. Use `compare_exchange` (review #6)
+    // so two concurrent first-callers can't disagree on the
+    // chosen provider — one wins the CAS, the loser re-reads.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let candidate = if nanos & 1 == 0 {
+        Provider::Exa
+    } else {
+        Provider::Parallel
+    };
+    let candidate_u8 = match candidate {
+        Provider::Exa => 1,
+        Provider::Parallel => 2,
+    };
+    match CHOSEN.compare_exchange(0, candidate_u8, Ordering::Release, Ordering::Acquire) {
+        Ok(_) => candidate,
+        Err(other) => {
+            // Lost the race. Use whatever the winner stored.
+            if other == 1 {
                 Provider::Exa
             } else {
                 Provider::Parallel
-            };
-            CHOSEN.store(
-                match pick {
-                    Provider::Exa => 1,
-                    Provider::Parallel => 2,
-                },
-                Ordering::Release,
-            );
-            pick
+            }
         }
     }
 }
@@ -240,7 +268,7 @@ async fn exa_mcp_search(
     let mut url = String::from("https://mcp.exa.ai/mcp");
     if let Some(key) = api_key.filter(|k| !k.is_empty()) {
         url.push_str("?exaApiKey=");
-        url.push_str(&urlencode_query(key));
+        url.push_str(&percent_encode(key));
     }
 
     // JSON-RPC `tools/call` envelope. Tool name + args match
@@ -384,7 +412,7 @@ fn extract_mcp_text(json: &str) -> Option<String> {
     None
 }
 
-fn urlencode_query(s: &str) -> String {
+fn percent_encode(s: &str) -> String {
     // Minimal query-string encoder: alphanumeric and `-_.~` pass
     // through, everything else gets %-encoded. Matches RFC 3986
     // unreserved + safe chars. The API key is typically opaque
@@ -421,10 +449,17 @@ async fn duckduckgo_search(
     // helper needs an extra feature flag that isn't enabled.
     // application/x-www-form-urlencoded is just `key=value&…` with
     // each value URL-encoded; we have one field, `q`.
-    let body = format!("q={}", urlencode_query(&args.query));
+    let body = format!("q={}", percent_encode(&args.query));
     let resp = client
         .post("https://html.duckduckgo.com/html/")
-        .header("User-Agent", "Mozilla/5.0 (compatible; dirge-agent/1.0)")
+        // Use a real browser UA — DDG aggressively rate-limits or
+        // serves blank pages to anything identifiable as a bot
+        // (review #15). The previous `compatible; dirge-agent/1.0`
+        // tripped that filter.
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0",
+        )
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
         .send()
@@ -462,38 +497,50 @@ fn parse_ddg_html(html: &str, max: usize) -> Vec<ExaResult> {
     // HTML parser and pulling one in would add a dep.
     let mut cursor = 0usize;
     while out.len() < max {
-        let Some(start) = html[cursor..].find("class=\"result__a\"") else {
+        // Anchor on `<a ` and inspect each one for the
+        // `result__a` class marker (#8 fix). Walking back from the
+        // class attribute could mismatch — `class="result__a"`
+        // appearing inside a `<script>` block or quoted text
+        // would otherwise pair with an unrelated nearby `<a `.
+        let Some(start) = html[cursor..].find("<a ") else {
             break;
         };
-        let abs_start = cursor + start;
-        // Walk back to the opening `<a ` of this anchor.
-        let Some(tag_start) = html[..abs_start].rfind("<a ") else {
+        let tag_start = cursor + start;
+        // Find the end of this opening tag (`>` after `<a `). If
+        // missing, the HTML is malformed; bail out.
+        let Some(close_off) = html[tag_start..].find('>') else {
             break;
         };
-        // href= attribute inside the anchor.
-        let href_search = &html[tag_start..abs_start + 32];
-        let href = href_search
+        let tag_end = tag_start + close_off;
+        // `tag` is the entire `<a … >` opening element including
+        // borders. Bounds-checked slice; no further +N math past
+        // the string end (#3 fix).
+        let tag = &html[tag_start..tag_end.min(html.len())];
+        cursor = tag_end + 1;
+        // Inspect the tag's attributes for the result-link class.
+        if !tag.contains("class=\"result__a\"") {
+            continue;
+        }
+        // Pull the href= value out of THIS specific tag.
+        let href = tag
             .find("href=\"")
             .and_then(|h| {
-                let after = tag_start + h + 6;
-                html[after..].find('"').map(|end| &html[after..after + end])
+                let after = h + 6;
+                tag[after..].find('"').map(|end| &tag[after..after + end])
             })
             .unwrap_or("")
             .to_string();
-        // Title text between `>` and `</a>`.
-        let Some(text_start) = html[abs_start..].find('>') else {
+        // Title text between the tag's `>` and the next `</a>`.
+        let title_open = tag_end + 1;
+        let Some(t_close) = html[title_open..].find("</a>") else {
             break;
         };
-        let title_open = abs_start + text_start + 1;
-        let Some(close_off) = html[title_open..].find("</a>") else {
-            break;
-        };
-        let title_raw = &html[title_open..title_open + close_off];
+        let title_raw = &html[title_open..title_open + t_close];
         let title = strip_tags_and_decode(title_raw);
         let url = unwrap_ddg_redirect(&decode_entities(&href));
 
         // Snippet: search forward for the NEXT `result__snippet`.
-        cursor = title_open + close_off;
+        cursor = title_open + t_close;
         let snippet = if let Some(sn_off) = html[cursor..].find("class=\"result__snippet\"") {
             let sn_abs = cursor + sn_off;
             let sn_text_start = html[sn_abs..].find('>').map(|p| sn_abs + p + 1);
@@ -582,7 +629,27 @@ fn strip_tags_and_decode(s: &str) -> String {
             _ => {}
         }
     }
+    // Pass 2: decode entities + filter control bytes (#9). Search
+    // results occasionally carry literal ESC / CR / C1 controls
+    // (mojibake, malformed pages). Letting them flow verbatim into
+    // the LLM prompt is inconsistent with the MCP-stderr sanitizer
+    // and could repaint the agent's chat output.
     decode_entities(no_tags.trim())
+        .chars()
+        .filter(|c| {
+            let cp = *c as u32;
+            // Allow tab, newline (the only formatting controls
+            // we want in snippets).
+            if cp == 0x09 || cp == 0x0a {
+                return true;
+            }
+            // Block C0 controls + DEL + C1 controls.
+            if cp < 0x20 || cp == 0x7f || (0x80..=0x9f).contains(&cp) {
+                return false;
+            }
+            true
+        })
+        .collect()
 }
 
 fn decode_entities(s: &str) -> String {
@@ -697,5 +764,163 @@ mod tests {
         // Cap is 500 chars on the snippet; nothing else contributes 'Z' here.
         let z_count = out.chars().filter(|c| *c == 'Z').count();
         assert_eq!(z_count, 500);
+    }
+
+    // === Review-batch tests ===
+
+    /// Review #3: `parse_ddg_html` must not panic on truncated HTML.
+    /// A response cut off mid-tag (e.g. fetch interrupted) should
+    /// return empty results rather than crash.
+    #[test]
+    fn ddg_parser_no_panic_on_truncated_html() {
+        // `<a ` near end with no closing `>`.
+        let html = "<a class=\"result__a\"";
+        let out = parse_ddg_html(html, 10);
+        assert!(out.is_empty());
+        // `<a >` followed by `result__a` declaration that's
+        // truncated.
+        let html = "<a >class=\"result_";
+        let out = parse_ddg_html(html, 10);
+        assert!(out.is_empty());
+        // Empty input.
+        let out = parse_ddg_html("", 10);
+        assert!(out.is_empty());
+    }
+
+    /// Review #3 + #8: `parse_ddg_html` happy path.
+    #[test]
+    fn ddg_parser_extracts_anchored_result() {
+        let html = r#"
+            <div class="result">
+              <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpath">
+                Example Title
+              </a>
+              <a class="result__snippet" href="https://example.com">A short snippet about the result.</a>
+            </div>
+        "#;
+        let out = parse_ddg_html(html, 5);
+        assert_eq!(out.len(), 1);
+        let r = &out[0];
+        assert!(r.url.as_deref().unwrap_or("").contains("example.com"));
+        assert!(r.title.as_deref().unwrap_or("").contains("Example Title"));
+        assert!(r.text.is_some());
+    }
+
+    /// Review #8: `class="result__a"` inside an unrelated context
+    /// (script / quoted text) must NOT be matched. Now keyed on
+    /// `<a ` tags.
+    #[test]
+    fn ddg_parser_ignores_class_string_outside_anchor() {
+        let html = r#"
+            <script>var x = 'class="result__a"';</script>
+            <p>The class="result__a" attribute is set here.</p>
+        "#;
+        let out = parse_ddg_html(html, 5);
+        assert!(out.is_empty());
+    }
+
+    /// Review #9: control bytes in snippet text are filtered before
+    /// reaching the LLM prompt.
+    #[test]
+    fn ddg_strip_decode_filters_control_bytes() {
+        let s = "hello\x1b[31m world\u{9b}\x07\x00";
+        let out = strip_tags_and_decode(s);
+        assert!(!out.contains('\x1b'));
+        assert!(!out.contains('\x07'));
+        assert!(!out.contains('\x00'));
+        assert!(!out.contains('\u{9b}'));
+        assert!(out.contains("hello"));
+        assert!(out.contains("world"));
+    }
+
+    /// Review #11: whitespace-only key gets trimmed away by the
+    /// constructor — won't leak into a `?exaApiKey=%20%20` URL.
+    #[test]
+    fn whitespace_key_is_trimmed_to_none() {
+        let tool = WebSearchTool::new(None, None, Some("  ".to_string()));
+        assert!(tool.exa_key.is_none());
+        let tool = WebSearchTool::new(None, None, Some(" real-key ".to_string()));
+        assert_eq!(tool.exa_key.as_deref(), Some("real-key"));
+    }
+
+    /// `parse_mcp_response` handles plain-JSON shape (no SSE).
+    #[test]
+    fn parse_mcp_response_plain_json() {
+        let body = r#"{"result":{"content":[{"type":"text","text":"hello world"}]}}"#;
+        assert_eq!(parse_mcp_response(body).as_deref(), Some("hello world"));
+    }
+
+    /// `parse_mcp_response` handles SSE `data: …` shape.
+    #[test]
+    fn parse_mcp_response_sse() {
+        let body = "event: message\ndata: {\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"sse hello\"}]}}\n\n";
+        assert_eq!(parse_mcp_response(body).as_deref(), Some("sse hello"));
+    }
+
+    /// `parse_mcp_response` returns None for malformed JSON instead
+    /// of panicking.
+    #[test]
+    fn parse_mcp_response_malformed_returns_none() {
+        assert!(parse_mcp_response("not json at all").is_none());
+        assert!(parse_mcp_response("{\"result\":\"wrong shape\"}").is_none());
+        assert!(parse_mcp_response("").is_none());
+    }
+
+    /// `unwrap_ddg_redirect` extracts the real URL from DDG's
+    /// `uddg=` redirect wrapper.
+    #[test]
+    fn ddg_unwrap_redirect() {
+        let r = unwrap_ddg_redirect(
+            "//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpath&rut=abc",
+        );
+        assert_eq!(r, "https://example.com/path");
+        // Non-redirect URL passes through unchanged.
+        let r = unwrap_ddg_redirect("https://direct.example.com/page");
+        assert_eq!(r, "https://direct.example.com/page");
+    }
+
+    /// `percent_encode` round-trips ASCII alphanumeric + RFC 3986
+    /// unreserved set as identity; encodes everything else.
+    #[test]
+    fn percent_encode_basic() {
+        assert_eq!(percent_encode("abc_-.~"), "abc_-.~");
+        assert_eq!(percent_encode("hello world"), "hello%20world");
+        assert_eq!(percent_encode("a+b"), "a%2Bb");
+        // Multi-byte UTF-8 — each byte gets its own %XX.
+        assert_eq!(percent_encode("é"), "%C3%A9");
+    }
+
+    /// Review #6: provider selection is stable within a process.
+    /// Honors `DIRGE_WEBSEARCH_PROVIDER` env override.
+    /// (Note: only testable via env override; the CAS path uses
+    /// a global atomic that other tests would race on.)
+    #[test]
+    fn provider_selection_honors_env_override() {
+        // SAFETY: tests in this module run sequentially because
+        // they all touch the same global state. set_var is safe
+        // single-threaded; the global CHOSEN AtomicU8 is
+        // independent.
+        // SAFETY: tests in this module run sequentially; set_var
+        // is safe in single-threaded context. We don't restore
+        // the env after — subsequent tests that need the random
+        // path would need their own override.
+        unsafe {
+            std::env::set_var("DIRGE_WEBSEARCH_PROVIDER", "exa");
+        }
+        assert_eq!(selected_provider(), Provider::Exa);
+        unsafe {
+            std::env::set_var("DIRGE_WEBSEARCH_PROVIDER", "parallel");
+        }
+        assert_eq!(selected_provider(), Provider::Parallel);
+        // Unknown value falls through to the (memoized) atomic
+        // pick; we don't assert which one wins to avoid flake.
+        unsafe {
+            std::env::set_var("DIRGE_WEBSEARCH_PROVIDER", "bogus");
+        }
+        let p = selected_provider();
+        assert!(matches!(p, Provider::Exa | Provider::Parallel));
+        unsafe {
+            std::env::remove_var("DIRGE_WEBSEARCH_PROVIDER");
+        }
     }
 }

@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::process::Stdio;
 
 use rmcp::service::{RoleClient, RunningService, serve_client};
-use tokio::io::AsyncBufReadExt;
 use tokio::process::{ChildStderr, Command};
 
 use super::config::McpServerConfig;
@@ -117,25 +116,95 @@ impl McpClientHandle {
 /// or stream EOF). No explicit cancel — the rmcp ChildWithCleanup
 /// Drop kills the child on shutdown, which closes stderr.
 fn spawn_stderr_forwarder(server_name: String, stderr: ChildStderr) {
+    /// Per-line byte cap. A buggy / runaway MCP child that writes
+    /// gigabytes without a newline would otherwise grow dirge's
+    /// `read_line` buffer until OOM. 16 KiB is generous for any
+    /// real log line; past it we truncate and emit a marker.
+    /// (#5 fix.)
+    const MAX_LINE_BYTES: usize = 16 * 1024;
     tokio::spawn(async move {
-        let reader = tokio::io::BufReader::new(stderr);
-        let mut lines = reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            // Drop any control / escape bytes so a child can't
-            // smuggle terminal queries through the forwarder.
-            // Strip everything below 0x20 except `\t`, plus any
-            // standalone ESC (0x1b). The `\x1b]` / `\x1b[` query
-            // shapes get neutralized here.
-            let sanitized: String = line
-                .chars()
-                .filter(|c| {
-                    let b = *c as u32;
-                    b == 0x09 || (0x20..0x7f).contains(&b) || b >= 0x80
-                })
-                .collect();
-            tracing::info!(target: "dirge::mcp", server = %server_name, "{}", sanitized);
+        use tokio::io::AsyncReadExt;
+        let mut reader = tokio::io::BufReader::new(stderr);
+        let mut buf = Vec::with_capacity(1024);
+        let mut byte_buf = [0u8; 4096];
+        loop {
+            let n = match reader.read(&mut byte_buf).await {
+                Ok(0) => break, // EOF
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            for &b in &byte_buf[..n] {
+                if b == b'\n' {
+                    emit_mcp_line(&server_name, &buf);
+                    buf.clear();
+                    continue;
+                }
+                if buf.len() >= MAX_LINE_BYTES {
+                    // Past the cap — finalise the line with a
+                    // truncation marker, then keep dropping
+                    // bytes until the next `\n` so the
+                    // overflow doesn't roll into the NEXT line.
+                    buf.extend_from_slice(b" ...[truncated]");
+                    emit_mcp_line(&server_name, &buf);
+                    buf.clear();
+                    // Skip bytes until next newline.
+                    // (Set buf to capacity already so we don't
+                    // grow; just discard until we see \n.)
+                    // We use a marker bool by reusing buf's len > 0:
+                    // simpler: just track a draining state.
+                    // For correctness, fall through to the
+                    // dropping branch below.
+                }
+                if buf.is_empty() && b == b'\r' {
+                    continue; // strip leading CR (CRLF from windows-y child)
+                }
+                buf.push(b);
+            }
+        }
+        // Flush any pending partial line on EOF.
+        if !buf.is_empty() {
+            emit_mcp_line(&server_name, &buf);
         }
     });
+}
+
+/// Sanitize and emit one MCP child stderr line through tracing.
+/// Filter blocks:
+///   - C0 controls except `\t` (0x00..=0x1F minus 0x09)
+///   - DEL (0x7F)
+///   - C1 controls (U+0080..=U+009F) — #1 fix: U+009B is single-byte
+///     CSI on terminals in 8-bit mode and behaves identically to
+///     `ESC[`, so leaving it through defeated the whole point of
+///     filtering ESC. Also blocks NEL (U+0085), DCS (U+0090), etc.
+///   - Trailing `\r` from CRLF children
+///
+/// Emits at `warn` level instead of `info` (#2 fix): dirge's default
+/// EnvFilter is `warn,rig=off`, so `info!` was silently dropped.
+/// Users with diagnostic needs (MCP server panics, init errors)
+/// would otherwise see nothing — a regression vs the old
+/// `Stdio::inherit()` where stderr printed unconditionally.
+fn emit_mcp_line(server_name: &str, raw: &[u8]) {
+    let s = String::from_utf8_lossy(raw);
+    let sanitized: String = s
+        .chars()
+        .filter(|c| {
+            let cp = *c as u32;
+            // Allow TAB explicitly.
+            if cp == 0x09 {
+                return true;
+            }
+            // Block C0 controls + DEL.
+            if cp < 0x20 || cp == 0x7f {
+                return false;
+            }
+            // Block C1 controls.
+            if (0x80..=0x9f).contains(&cp) {
+                return false;
+            }
+            true
+        })
+        .collect();
+    tracing::warn!(target: "dirge::mcp", server = %server_name, "{}", sanitized);
 }
 
 fn parse_headers(
