@@ -80,7 +80,11 @@ use std::pin::Pin;
 /// (multi-call). `CompletionModel: Clone` is part of the trait
 /// bounds so this is always cheap (Arc-internally in most rig
 /// impls).
-pub fn rig_stream_fn_from_model<M>(model: M, tools: Vec<ToolDefinition>) -> StreamFn
+pub fn rig_stream_fn_from_model<M>(
+    model: M,
+    tools: Vec<ToolDefinition>,
+    chunk_timeout: Option<std::time::Duration>,
+) -> StreamFn
 where
     M: CompletionModel + Clone + Send + Sync + 'static,
     M::StreamingResponse: Clone + Unpin + Send + Sync + GetTokenUsage + 'static,
@@ -89,7 +93,7 @@ where
     Arc::new(move |ctx: LlmContext, _api_key, _signal: AbortSignal| {
         let model = model.clone();
         let tools = tools.clone();
-        invoke_one_stream(model, tools, ctx)
+        invoke_one_stream(model, tools, ctx, chunk_timeout)
     })
 }
 
@@ -106,6 +110,7 @@ fn invoke_one_stream<M>(
     model: M,
     tools: Arc<Vec<ToolDefinition>>,
     ctx: LlmContext,
+    chunk_timeout: Option<std::time::Duration>,
 ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send>>
 where
     M: CompletionModel + Clone + Send + Sync + 'static,
@@ -145,7 +150,7 @@ where
         // 4. Call model.stream; wrap result or emit error.
         match model.stream(request).await {
             Ok(response) => {
-                let mut wrapped = wrap_rig_stream(response);
+                let mut wrapped = wrap_rig_stream(response, chunk_timeout);
                 use futures::stream::StreamExt;
                 while let Some(evt) = wrapped.next().await {
                     yield evt;
@@ -525,7 +530,7 @@ mod tests {
     #[tokio::test]
     async fn factory_invocation_produces_start_and_done() {
         use futures::stream::StreamExt;
-        let factory = rig_stream_fn_from_model::<NopModel>(NopModel, vec![]);
+        let factory = rig_stream_fn_from_model::<NopModel>(NopModel, vec![], None);
         let ctx = LlmContext {
             system_prompt: "test preamble".to_string(),
             messages: vec![serde_json::json!({"role": "user", "content": "hi"})],
@@ -552,7 +557,7 @@ mod tests {
     #[tokio::test]
     async fn factory_empty_messages_emits_error() {
         use futures::stream::StreamExt;
-        let factory = rig_stream_fn_from_model::<NopModel>(NopModel, vec![]);
+        let factory = rig_stream_fn_from_model::<NopModel>(NopModel, vec![], None);
         let ctx = LlmContext {
             system_prompt: String::new(),
             messages: Vec::new(),

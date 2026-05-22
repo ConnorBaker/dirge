@@ -59,20 +59,34 @@ use super::message::{AssistantMessage, ContentBlock, DeltaPhase, StopReason, Str
 ///      stop.
 pub fn wrap_rig_stream<R>(
     rig_stream: StreamingCompletionResponse<R>,
+    chunk_timeout: Option<std::time::Duration>,
 ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send>>
 where
     R: Clone + Unpin + Send + GetTokenUsage + 'static,
 {
-    wrap_streamed_assistant(Box::pin(rig_stream))
+    wrap_streamed_assistant(Box::pin(rig_stream), chunk_timeout)
 }
 
 /// Lower-level variant: wrap any `Stream<Result<StreamedAssistantContent<R>,
 /// CompletionError>>`. Used by tests to feed canned event
 /// sequences; production callers use [`wrap_rig_stream`] directly.
+///
+/// **Chunk timeout** (phase 4.5h-3): if `chunk_timeout` is `Some`,
+/// each `raw.next().await` is wrapped in `tokio::time::timeout`.
+/// On timeout we emit an Error event with `"timed out"` in the
+/// message so the existing `recovery::classify_error` substring
+/// match routes it to `ErrorKind::Network` and the retry wrapper
+/// picks it up. Matches the existing runner.rs:285-306 pattern
+/// exactly so cross-path retry behavior is identical.
+///
+/// `None` disables the timeout — useful for tests, debug
+/// sessions, or providers known to have long legitimate gaps
+/// where the default `300s` is still too short.
 pub fn wrap_streamed_assistant<R>(
     mut raw: Pin<
         Box<dyn Stream<Item = Result<StreamedAssistantContent<R>, CompletionError>> + Send>,
     >,
+    chunk_timeout: Option<std::time::Duration>,
 ) -> Pin<Box<dyn Stream<Item = StreamEvent> + Send>>
 where
     R: Clone + Unpin + Send + 'static,
@@ -92,7 +106,33 @@ where
         let mut tool_indices: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
 
-        while let Some(item) = raw.next().await {
+        loop {
+            // Apply per-chunk timeout if configured. The yield
+            // pattern below mirrors `while let Some(...)` exactly
+            // for the non-timeout path.
+            let next = match chunk_timeout {
+                Some(t) => match tokio::time::timeout(t, raw.next()).await {
+                    Ok(item) => item,
+                    Err(_) => {
+                        // Phrase using "timed out" so
+                        // recovery::classify_error matches on
+                        // it and routes to ErrorKind::Network for
+                        // retry. Matches runner.rs:301-304.
+                        yield StreamEvent::Error {
+                            error: format!(
+                                "stream chunk timed out after {}s (provider stalled or connection silently dropped) — bump `stream_chunk_timeout_secs` in config.json if your model has long reasoning gaps",
+                                t.as_secs(),
+                            ),
+                        };
+                        return;
+                    }
+                },
+                None => raw.next().await,
+            };
+            let item = match next {
+                Some(item) => item,
+                None => break,
+            };
             match item {
                 Ok(StreamedAssistantContent::Text(t)) => {
                     match current_text_idx {
@@ -372,7 +412,7 @@ mod tests {
                 text: " world".to_string(),
             })),
         ]);
-        let events = drain(wrap_streamed_assistant(raw)).await;
+        let events = drain(wrap_streamed_assistant(raw, None)).await;
         let labels: Vec<_> = events.iter().map(label).collect();
         assert_eq!(
             labels,
@@ -412,7 +452,7 @@ mod tests {
             },
             internal_call_id: "internal_1".to_string(),
         })]);
-        let events = drain(wrap_streamed_assistant(raw)).await;
+        let events = drain(wrap_streamed_assistant(raw, None)).await;
         let labels: Vec<_> = events.iter().map(label).collect();
         assert_eq!(
             labels,
@@ -463,7 +503,7 @@ mod tests {
                 content: ToolCallDeltaContent::Delta("th\":\"/tmp/x\"}".to_string()),
             }),
         ]);
-        let events = drain(wrap_streamed_assistant(raw)).await;
+        let events = drain(wrap_streamed_assistant(raw, None)).await;
         let labels: Vec<_> = events.iter().map(label).collect();
         assert_eq!(
             labels,
@@ -507,7 +547,7 @@ mod tests {
                 reasoning: " about this".to_string(),
             }),
         ]);
-        let events = drain(wrap_streamed_assistant(raw)).await;
+        let events = drain(wrap_streamed_assistant(raw, None)).await;
         let labels: Vec<_> = events.iter().map(label).collect();
         assert_eq!(
             labels,
@@ -538,7 +578,7 @@ mod tests {
         let raw = raw_stream(vec![Ok(StreamedAssistantContent::Reasoning(
             Reasoning::new("All thinking"),
         ))]);
-        let events = drain(wrap_streamed_assistant(raw)).await;
+        let events = drain(wrap_streamed_assistant(raw, None)).await;
         assert!(matches!(events[0], StreamEvent::Start { .. }));
         assert!(matches!(
             events[1],
@@ -562,7 +602,7 @@ mod tests {
                 text: " more text".to_string(),
             })),
         ]);
-        let events = drain(wrap_streamed_assistant(raw)).await;
+        let events = drain(wrap_streamed_assistant(raw, None)).await;
         assert!(matches!(events.last(), Some(StreamEvent::Error { .. })));
         let dones = events
             .iter()
@@ -587,7 +627,7 @@ mod tests {
                 text: "done".to_string(),
             })),
         ]);
-        let events = drain(wrap_streamed_assistant(raw)).await;
+        let events = drain(wrap_streamed_assistant(raw, None)).await;
         let final_msg = events
             .iter()
             .rev()
@@ -612,5 +652,118 @@ mod tests {
             &final_msg.content[2],
             ContentBlock::Text { text } if text == "done"
         ));
+    }
+
+    // =================================================================
+    // Phase 4.5h-3 — chunk timeout enforcement tests
+    // =================================================================
+
+    use std::time::Duration;
+
+    /// Stream that yields one item then stalls forever. Use with
+    /// `tokio::time::pause` so the stall is virtual.
+    fn stalling_stream() -> Pin<
+        Box<
+            dyn Stream<Item = Result<StreamedAssistantContent<TestResponse>, CompletionError>>
+                + Send,
+        >,
+    > {
+        use futures::stream;
+        Box::pin(stream::unfold(0u32, |n| async move {
+            if n == 0 {
+                Some((
+                    Ok(StreamedAssistantContent::Text(Text {
+                        text: "first chunk".to_string(),
+                    })),
+                    1,
+                ))
+            } else {
+                // Stall: future that never resolves. Under
+                // `tokio::time::pause` this triggers the
+                // timeout deterministically.
+                let () = futures::future::pending().await;
+                None
+            }
+        }))
+    }
+
+    /// `None` chunk_timeout → no timeout enforcement. Verifies
+    /// the disabled-timeout path is identical to the pre-h-3
+    /// behavior.
+    #[tokio::test]
+    async fn chunk_timeout_none_disables_timeout() {
+        let raw = raw_stream(vec![Ok(StreamedAssistantContent::Text(Text {
+            text: "ok".to_string(),
+        }))]);
+        let events = drain(wrap_streamed_assistant(raw, None)).await;
+        // Normal completion — no Error.
+        assert!(events.iter().any(|e| matches!(e, StreamEvent::Done { .. })));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::Error { .. }))
+        );
+    }
+
+    /// Stalled stream + `Some(timeout)` → Error event with
+    /// "timed out" substring. The substring is the contract:
+    /// `recovery::classify_error` matches on it and routes to
+    /// `ErrorKind::Network` for retry.
+    #[tokio::test]
+    async fn chunk_timeout_fires_with_classifiable_error() {
+        tokio::time::pause();
+        let raw = stalling_stream();
+        let drain_task = tokio::spawn(async move {
+            drain(wrap_streamed_assistant(raw, Some(Duration::from_secs(5)))).await
+        });
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let events = drain_task.await.unwrap();
+
+        // Sequence: Start, Delta(TextStart for "first chunk"),
+        // Error("timed out ..."). No Done.
+        let last = events.last().expect("must have events");
+        match last {
+            StreamEvent::Error { error } => {
+                assert!(
+                    error.contains("timed out"),
+                    "error text must contain 'timed out' for recovery::classify_error \
+                     to route this to ErrorKind::Network — got: {error}"
+                );
+            }
+            other => panic!("expected Error as last event, got {other:?}"),
+        }
+        assert!(
+            !events.iter().any(|e| matches!(e, StreamEvent::Done { .. })),
+            "no Done after timeout"
+        );
+    }
+
+    /// Fast stream + tight timeout still completes normally —
+    /// timeout only fires when a chunk takes longer than the
+    /// deadline, not when the whole stream does. (Per-chunk
+    /// semantics, matching runner.rs.)
+    #[tokio::test]
+    async fn chunk_timeout_does_not_fire_on_fast_stream() {
+        let raw = raw_stream(vec![
+            Ok(StreamedAssistantContent::Text(Text {
+                text: "fast 1".to_string(),
+            })),
+            Ok(StreamedAssistantContent::Text(Text {
+                text: " 2".to_string(),
+            })),
+        ]);
+        // Tight timeout (10ms) but all events fire
+        // immediately from the iter stream — no real wait.
+        let events = drain(wrap_streamed_assistant(
+            raw,
+            Some(Duration::from_millis(10)),
+        ))
+        .await;
+        assert!(events.iter().any(|e| matches!(e, StreamEvent::Done { .. })));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::Error { .. }))
+        );
     }
 }

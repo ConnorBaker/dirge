@@ -512,15 +512,32 @@ impl AnyAgent {
         tools: Vec<rig::completion::ToolDefinition>,
     ) -> crate::agent::agent_loop::StreamFn {
         use crate::agent::agent_loop::rig_stream_fn_from_model;
+        let chunk_timeout = self.chunk_timeout;
         match &self.inner {
-            AnyAgentInner::OpenRouter(a) => rig_stream_fn_from_model((*a.model).clone(), tools),
-            AnyAgentInner::OpenAI(a) => rig_stream_fn_from_model((*a.model).clone(), tools),
-            AnyAgentInner::Anthropic(a) => rig_stream_fn_from_model((*a.model).clone(), tools),
-            AnyAgentInner::Gemini(a) => rig_stream_fn_from_model((*a.model).clone(), tools),
-            AnyAgentInner::DeepSeek(a) => rig_stream_fn_from_model((*a.model).clone(), tools),
-            AnyAgentInner::Glm(a) => rig_stream_fn_from_model((*a.model).clone(), tools),
-            AnyAgentInner::Ollama(a) => rig_stream_fn_from_model((*a.model).clone(), tools),
-            AnyAgentInner::Custom(a) => rig_stream_fn_from_model((*a.model).clone(), tools),
+            AnyAgentInner::OpenRouter(a) => {
+                rig_stream_fn_from_model((*a.model).clone(), tools.clone(), Some(chunk_timeout))
+            }
+            AnyAgentInner::OpenAI(a) => {
+                rig_stream_fn_from_model((*a.model).clone(), tools.clone(), Some(chunk_timeout))
+            }
+            AnyAgentInner::Anthropic(a) => {
+                rig_stream_fn_from_model((*a.model).clone(), tools.clone(), Some(chunk_timeout))
+            }
+            AnyAgentInner::Gemini(a) => {
+                rig_stream_fn_from_model((*a.model).clone(), tools.clone(), Some(chunk_timeout))
+            }
+            AnyAgentInner::DeepSeek(a) => {
+                rig_stream_fn_from_model((*a.model).clone(), tools.clone(), Some(chunk_timeout))
+            }
+            AnyAgentInner::Glm(a) => {
+                rig_stream_fn_from_model((*a.model).clone(), tools.clone(), Some(chunk_timeout))
+            }
+            AnyAgentInner::Ollama(a) => {
+                rig_stream_fn_from_model((*a.model).clone(), tools.clone(), Some(chunk_timeout))
+            }
+            AnyAgentInner::Custom(a) => {
+                rig_stream_fn_from_model((*a.model).clone(), tools.clone(), Some(chunk_timeout))
+            }
         }
     }
 }
