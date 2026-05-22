@@ -108,6 +108,25 @@ absolute-path rules outside the working directory, and `doom_loop`
 for repeated identical tool calls (default: `ask`). If `bash` is
 omitted, dirge installs its built-in safe bash allow/deny rules.
 
+If `mcp_tool` is omitted, dirge defaults it to `ask` for ALL
+servers — MCP tools execute external code (the server's
+implementation, plus whatever filesystem / network / API effects it
+has), and silent default-allow let entire query sequences run before
+any prompt fired. To re-enable silent allow for a trusted server:
+
+```json
+{
+  "permission": {
+    "mcp_tool": {
+      "mcp_tool:lattice:*": "allow"
+    }
+  }
+}
+```
+
+Or accept once at the alert and pick "allow always" for the same
+session-allowlist effect.
+
 ### Mode semantics
 
 - **`standard`** (default): every rule in `permission` is consulted; tools without

@@ -150,6 +150,33 @@ impl PermissionChecker {
             rules.insert("bash".to_string(), defaults);
         }
 
+        // MCP tools execute external code (the MCP server's
+        // implementation, plus whatever effects the server has on
+        // the filesystem / network / API services). The previous
+        // default was the inherited `default_action` (Allow) since
+        // `mcp_tool` had no rule installed; that let an entire
+        // sequence of MCP calls execute silently, with only the
+        // doom-loop detector eventually prompting on the 3rd
+        // identical call. User reported running through several
+        // MCP queries without ever being asked. Install a default
+        // `Ask` rule when no explicit config exists. Users who
+        // trust a specific MCP server can pin it with config:
+        //
+        //   "permission": {
+        //     "mcp_tool": {
+        //       "mcp_tool:lattice:*": "allow"
+        //     }
+        //   }
+        //
+        // …or accept once and pick "allow always" for the same
+        // effect via the session allowlist.
+        if !rules.contains_key("mcp_tool") {
+            rules.insert(
+                "mcp_tool".to_string(),
+                vec![(pattern_for_tool("mcp_tool", "*"), Action::Ask)],
+            );
+        }
+
         // External-directory rules are always path patterns by definition.
         let ext_dir_rules = config
             .external_directory
@@ -782,6 +809,48 @@ mod tests {
             checker.check("bash", "ls"),
             CheckResult::Denied(_)
         ));
+    }
+
+    /// User report: a sequence of MCP tool calls ran silently
+    /// before any permission prompt fired. Root cause was that
+    /// `mcp_tool` had no default rule, so the checker fell back to
+    /// `default_action` (Allow). MCP tools execute external code;
+    /// the default should be Ask. This test pins the new contract.
+    #[test]
+    fn mcp_tool_defaults_to_ask_when_unconfigured() {
+        let mut checker = PermissionChecker::new(
+            &PermissionConfig::default(),
+            SecurityMode::Standard,
+            Some(std::path::PathBuf::from("/tmp")),
+        );
+        let r = checker.check("mcp_tool", "mcp_tool:lattice:lattice_query");
+        assert!(
+            matches!(r, CheckResult::Ask),
+            "unconfigured mcp_tool must default to Ask, got {:?}",
+            r,
+        );
+    }
+
+    /// A user who explicitly configures mcp_tool rules retains
+    /// control — the default-Ask only fires when no rule exists.
+    #[test]
+    fn mcp_tool_explicit_config_overrides_default_ask() {
+        use std::collections::HashMap;
+        let mut config = PermissionConfig::default();
+        let mut granular = HashMap::new();
+        granular.insert("mcp_tool:lattice:*".to_string(), Action::Allow);
+        config.mcp_tool = Some(crate::permission::ToolPerm::Granular(granular));
+        let mut checker = PermissionChecker::new(
+            &config,
+            SecurityMode::Standard,
+            Some(std::path::PathBuf::from("/tmp")),
+        );
+        let r = checker.check("mcp_tool", "mcp_tool:lattice:lattice_query");
+        assert!(
+            matches!(r, CheckResult::Allowed),
+            "explicit Allow rule must win, got {:?}",
+            r,
+        );
     }
 
     /// Empty deny list is a no-op — back to normal rule eval.
