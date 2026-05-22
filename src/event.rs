@@ -13,6 +13,31 @@ pub enum AgentEvent {
         name: CompactString,
         args: serde_json::Value,
     },
+    /// Fired immediately AFTER `ToolCall` — marks the transition
+    /// from "LLM has emitted this call" to "dispatch is imminent".
+    /// Semantically: between this event and the matching
+    /// `ToolResult`, the tool is *running*. Consumers use it to:
+    ///   - Show per-tool spinners / status badges
+    ///   - Emit ACP `ToolCallStatus::InProgress` updates (the
+    ///     ACP protocol distinguishes pending / in_progress /
+    ///     completed; without this dirge skipped the in_progress
+    ///     transition)
+    ///   - Plugin observability hooks that need a "started" tick
+    ///     distinct from "LLM decided to call"
+    ///
+    /// The id matches the corresponding `ToolCall.id` so consumers
+    /// can pair them. UI consumers that already track in-flight
+    /// state via "saw ToolCall, no matching ToolResult" can ignore
+    /// this event safely — it's purely additive.
+    ///
+    /// `name` is intentionally omitted — consumers correlate by
+    /// `id` against the immediately-prior `ToolCall` which already
+    /// carries the name. Keeping the variant lean (one field)
+    /// keeps the per-event allocation cheap; the runner emits
+    /// many of these per turn.
+    ToolStarted {
+        id: CompactString,
+    },
     ToolResult {
         /// Matching call id from the `ToolCall` event. Empty if the
         /// provider didn't emit one — the UI falls back to

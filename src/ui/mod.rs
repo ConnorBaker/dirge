@@ -2019,6 +2019,13 @@ pub async fn run_interactive(
                         // longer dispatches it here — that would double-
                         // fire the hook per tool call.
                     }
+                    AgentEvent::ToolStarted { .. } => {
+                        // No UI work yet — the chamber TOP is
+                        // already painted at ToolCall time. Future
+                        // consumers (per-tool spinners, exec-time
+                        // measurement) can hook in here without
+                        // adding a new event variant.
+                    }
                     AgentEvent::ToolResult { id, output } => {
                         // Phase 3: pair the result with its call.
                         // Prefer id-match; fall back to the most-

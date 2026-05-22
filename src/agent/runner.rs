@@ -320,13 +320,25 @@ where
             })) => {
                 flush_boundaries(turns.observe_assistant_content(), event_tx).await;
                 outcome.had_tool_calls = true;
+                let id = CompactString::from(tool_call.id);
+                let name = CompactString::from(tool_call.function.name);
                 let _ = event_tx
                     .send(AgentEvent::ToolCall {
-                        id: CompactString::from(tool_call.id),
-                        name: CompactString::from(tool_call.function.name),
+                        id: id.clone(),
+                        name: name.clone(),
                         args: tool_call.function.arguments,
                     })
                     .await;
+                // ToolStarted fires immediately after ToolCall —
+                // semantic boundary between "LLM emitted the call"
+                // and "rig is about to dispatch". The rig
+                // multi-turn stream dispatches the tool right
+                // after this match arm returns, so this is the
+                // closest pre-execution tick available without
+                // patching rig itself. ACP consumers use it to
+                // surface `ToolCallStatus::InProgress`.
+                let _ = event_tx.send(AgentEvent::ToolStarted { id }).await;
+                let _ = name; // emitted via the preceding ToolCall
             }
             Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
                 tool_result,

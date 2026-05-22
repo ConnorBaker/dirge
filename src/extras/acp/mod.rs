@@ -236,6 +236,22 @@ async fn run_prompt(
                 );
                 let _ = cx.send_notification(notif);
             }
+            AgentEvent::ToolStarted { id } => {
+                // Surface the pending → in_progress transition the
+                // ACP protocol expects between the initial ToolCall
+                // and the eventual completion. Previously dirge
+                // skipped this transition; consumers had no way to
+                // distinguish "queued" from "running".
+                if let Some(acp_id) = correlator.resolve(id.as_str()) {
+                    let fields = ToolCallUpdateFields::new().status(ToolCallStatus::InProgress);
+                    let update = ToolCallUpdate::new(acp_id, fields);
+                    let notif = SessionNotification::new(
+                        session_id.clone(),
+                        SessionUpdate::ToolCallUpdate(update),
+                    );
+                    let _ = cx.send_notification(notif);
+                }
+            }
             AgentEvent::ToolResult { id, output } => {
                 let id = correlator
                     .resolve(id.as_str())
