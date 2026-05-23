@@ -4,7 +4,7 @@ use tokio::process::Command;
 use tokio::time::Duration;
 
 use crate::agent::tools::cache::ToolCache;
-use crate::agent::tools::{AskSender, BashArgs, PermCheck, ToolError, check_perm};
+use crate::agent::tools::{AskSender, BashArgs, PermCheck, ToolError, check_perm, check_perm_path};
 
 use crate::sandbox::Sandbox;
 #[cfg(feature = "semantic-bash")]
@@ -335,6 +335,18 @@ async fn check_bash_segments(
 
         for segment in &segments {
             check_perm(permission, ask_tx, "bash", segment).await?;
+        }
+
+        // C4 (audit fix): the segment loop above only checks each
+        // *command*. Output redirections (`> /etc/something`,
+        // `>> ~/.ssh/authorized_keys`) write files that the path
+        // permission gate would otherwise refuse. Route every
+        // redirect target through `check_perm_path` so write/edit's
+        // path rules also apply to redirects. False-positive prompts
+        // (read-side `< file`) are acceptable; bypassing the path
+        // gate via `echo … > sensitive` is not.
+        for target in bash::extract_redirect_targets(command) {
+            check_perm_path(permission, ask_tx, "bash", &target).await?;
         }
         Ok(())
     }

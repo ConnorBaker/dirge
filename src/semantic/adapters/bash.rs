@@ -65,6 +65,229 @@ mod tests {
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0], "for i in");
     }
+
+    // --- C3: compound-form recursion ---------------------------
+
+    /// Brace groups recurse — each contained command lands as its
+    /// own segment so per-command rules fire. Previously the whole
+    /// `{ ... }` was pushed verbatim and matched no rule.
+    #[test]
+    fn test_brace_group_recurses_into_commands() {
+        let segments = parse_bash_segments("{ echo a; rm -rf /tmp/x; }");
+        assert!(
+            segments.iter().any(|s| s.starts_with("echo")),
+            "got: {segments:?}"
+        );
+        assert!(
+            segments.iter().any(|s| s.starts_with("rm")),
+            "got: {segments:?}"
+        );
+        // The literal "{ ... }" wrapper should NOT appear as a segment.
+        assert!(
+            !segments.iter().any(|s| s.contains("{ echo")),
+            "got: {segments:?}"
+        );
+    }
+
+    /// if/then/fi recurses into its body — the inner commands get
+    /// individual permission checks.
+    #[test]
+    fn test_if_statement_recurses_into_body() {
+        let segments = parse_bash_segments("if true; then rm /tmp/x; echo done; fi");
+        assert!(
+            segments.iter().any(|s| s.starts_with("rm")),
+            "got: {segments:?}"
+        );
+        assert!(
+            segments.iter().any(|s| s.starts_with("echo")),
+            "got: {segments:?}"
+        );
+    }
+
+    /// while loops same.
+    #[test]
+    fn test_while_loop_recurses() {
+        let segments = parse_bash_segments("while true; do rm -rf /tmp/x; done");
+        assert!(
+            segments.iter().any(|s| s.starts_with("rm")),
+            "got: {segments:?}"
+        );
+    }
+
+    /// for loops same.
+    #[test]
+    fn test_for_loop_recurses() {
+        let segments = parse_bash_segments("for f in a b c; do rm $f; done");
+        assert!(
+            segments.iter().any(|s| s.starts_with("rm")),
+            "got: {segments:?}"
+        );
+    }
+
+    /// case statements: each case-clause body is recursed into.
+    #[test]
+    fn test_case_statement_recurses() {
+        let segments = parse_bash_segments("case $x in foo) rm /tmp/x;; bar) echo b;; esac");
+        assert!(
+            segments.iter().any(|s| s.starts_with("rm")),
+            "got: {segments:?}"
+        );
+        assert!(
+            segments.iter().any(|s| s.starts_with("echo")),
+            "got: {segments:?}"
+        );
+    }
+
+    // --- C4: redirect-target extraction ------------------------
+
+    use crate::semantic::adapters::bash::extract_redirect_targets;
+
+    #[test]
+    fn extract_redirect_targets_output_redirect() {
+        let t = extract_redirect_targets("echo pwned > /etc/something");
+        assert_eq!(t, vec!["/etc/something".to_string()]);
+    }
+
+    #[test]
+    fn extract_redirect_targets_append() {
+        let t = extract_redirect_targets("echo line >> /var/log/foo");
+        assert_eq!(t, vec!["/var/log/foo".to_string()]);
+    }
+
+    #[test]
+    fn extract_redirect_targets_multiple() {
+        // `cmd > a 2> b` writes to BOTH a and b — both should be
+        // checked by the path gate.
+        let t = extract_redirect_targets("rustc src.rs > out.log 2> err.log");
+        assert!(t.contains(&"out.log".to_string()), "got: {t:?}");
+        assert!(t.contains(&"err.log".to_string()), "got: {t:?}");
+    }
+
+    #[test]
+    fn extract_redirect_targets_strips_quotes() {
+        let t = extract_redirect_targets("echo x > \"/tmp/with spaces\"");
+        assert_eq!(t, vec!["/tmp/with spaces".to_string()]);
+    }
+
+    #[test]
+    fn extract_redirect_targets_no_redirects() {
+        assert!(extract_redirect_targets("echo hello").is_empty());
+        assert!(extract_redirect_targets("cargo test --all").is_empty());
+    }
+
+    #[test]
+    fn extract_redirect_targets_heredoc_skipped() {
+        // <<EOF has no file target — skip.
+        let t = extract_redirect_targets("cat <<EOF\nhi\nEOF");
+        assert!(t.is_empty(), "got: {t:?}");
+    }
+
+    /// Redirected statement: the inner command is checked (redirect
+    /// operands handled by C4 separately, not surfaced here).
+    #[test]
+    fn test_redirected_statement_recurses_to_inner_command() {
+        let segments = parse_bash_segments("echo pwned > /etc/something");
+        assert!(
+            segments.iter().any(|s| s.starts_with("echo")),
+            "got: {segments:?}"
+        );
+        // Old behaviour pushed the whole `echo pwned > /etc/something`;
+        // now the segment is just the command without the redirect.
+        assert!(
+            !segments.iter().any(|s| s.contains("/etc/something")),
+            "segment should NOT include the redirect target; got: {segments:?}"
+        );
+    }
+}
+
+/// C4 (audit fix): extract redirect target paths from a bash
+/// command so the caller can route each through the path permission
+/// gate. Previously `echo pwned > /etc/something` matched the safe
+/// `echo **` rule and wrote to the destination without any path
+/// check — the redirect target was invisible to the permission
+/// system.
+///
+/// Returns destination paths for: `>` `>>` `&>` `&>>` `>&` `<` `<<<`
+/// and combined forms (`1>file`, `2>file`, etc.). Heredocs (`<<EOF`)
+/// have no file target so they're skipped. Empty when no redirects.
+///
+/// Returns `Vec::new()` on parse error or when the `semantic-bash`
+/// feature is disabled — the caller still gets the normal segment
+/// checks, just no extra path gate for the redirect destination.
+#[allow(dead_code)]
+pub fn extract_redirect_targets(command: &str) -> Vec<String> {
+    #[cfg(feature = "semantic-bash")]
+    {
+        use tree_sitter::Parser;
+        let lang: tree_sitter::Language = tree_sitter_bash::LANGUAGE.into();
+        let mut parser = Parser::new();
+        if parser.set_language(&lang).is_err() {
+            return Vec::new();
+        }
+        let Some(tree) = parser.parse(command, None) else {
+            return Vec::new();
+        };
+        if tree.root_node().has_error() {
+            return Vec::new();
+        }
+        let mut targets = Vec::new();
+        collect_redirect_targets(tree.root_node(), command.as_bytes(), &mut targets);
+        targets
+    }
+    #[cfg(not(feature = "semantic-bash"))]
+    {
+        let _ = command;
+        Vec::new()
+    }
+}
+
+#[cfg(feature = "semantic-bash")]
+fn collect_redirect_targets(node: tree_sitter::Node, source: &[u8], out: &mut Vec<String>) {
+    match node.kind() {
+        // `file_redirect` is the tree-sitter-bash node for `> file`,
+        // `>> file`, `&> file`, `1> file`, `2> file`, etc. It has the
+        // operator as an anonymous child + a `word`/`string`/etc.
+        // named child carrying the destination.
+        "file_redirect" => {
+            // Find the destination — typically the last named child.
+            for i in (0..node.named_child_count()).rev() {
+                if let Some(child) = node.named_child(i) {
+                    if let Ok(text) = child.utf8_text(source) {
+                        let trimmed = unquote_simple(text.trim());
+                        if !trimmed.is_empty() && !trimmed.starts_with("&") {
+                            out.push(trimmed);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        // `herestring_redirect` (<<<) is followed by a value, not a
+        // file target — skip. Heredoc (<<EOF) similarly has no path.
+        "heredoc_redirect" | "herestring_redirect" => {}
+        _ => {
+            for i in 0..node.named_child_count() {
+                if let Some(child) = node.named_child(i) {
+                    collect_redirect_targets(child, source, out);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "semantic-bash")]
+fn unquote_simple(s: &str) -> String {
+    // Tree-sitter `word` nodes come without quotes; `string` nodes
+    // include them. Strip a single matched pair of leading/trailing
+    // quotes so the path matches what the shell would resolve.
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2
+        && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
+    {
+        return s[1..s.len() - 1].to_string();
+    }
+    s.to_string()
 }
 
 #[allow(dead_code)]
@@ -141,6 +364,14 @@ fn has_complex_constructs(node: tree_sitter::Node) -> bool {
 
 #[cfg(feature = "semantic-bash")]
 fn collect_segments(node: tree_sitter::Node, source: &[u8], out: &mut Vec<String>) {
+    // C3 (audit fix): compound forms (`{ ... }`, `if`, `while`, `for`,
+    // `case`, function bodies) previously pushed the whole construct
+    // as one opaque segment that matched no per-command rule — so
+    // `{ rm -rf /tmp/foo; }` and `if cond; then rm; fi` bypassed
+    // every bash permission rule. Opencode's `shell.ts` recurses via
+    // `descendantsOfType("command")`; we mirror that by recursing
+    // into compound forms so each contained `command` node lands as
+    // its own segment.
     match node.kind() {
         "program" | "list" => {
             for i in 0..node.named_child_count() {
@@ -152,22 +383,71 @@ fn collect_segments(node: tree_sitter::Node, source: &[u8], out: &mut Vec<String
         "pipeline" => {
             for i in 0..node.named_child_count() {
                 if let Some(child) = node.named_child(i) {
-                    let text = child.utf8_text(source).unwrap_or("").trim().to_string();
-                    if !text.is_empty() {
-                        out.push(text);
+                    // Each side of a pipe is checked separately —
+                    // preserve the leaf-text behaviour here (a
+                    // pipeline element is a single command, possibly
+                    // redirected; recursing once into a redirected
+                    // pipeline element collects the inner command).
+                    if child.kind() == "redirected_statement"
+                        || child.kind() == "compound_statement"
+                        || child.kind() == "if_statement"
+                        || child.kind() == "while_statement"
+                        || child.kind() == "for_statement"
+                        || child.kind() == "case_statement"
+                        || child.kind() == "function_definition"
+                        || child.kind() == "c_style_for_statement"
+                    {
+                        collect_segments(child, source, out);
+                    } else {
+                        let text = child.utf8_text(source).unwrap_or("").trim().to_string();
+                        if !text.is_empty() {
+                            out.push(text);
+                        }
                     }
                 }
             }
         }
-        "command"
-        | "redirected_statement"
-        | "compound_statement"
+        // Compound forms — recurse so each inner `command` lands as
+        // its own segment.
+        "compound_statement"
         | "if_statement"
         | "while_statement"
         | "for_statement"
         | "case_statement"
         | "function_definition"
-        | "c_style_for_statement" => {
+        | "c_style_for_statement"
+        | "case_item"
+        | "elif_clause"
+        | "else_clause"
+        | "do_group" => {
+            for i in 0..node.named_child_count() {
+                if let Some(child) = node.named_child(i) {
+                    collect_segments(child, source, out);
+                }
+            }
+        }
+        // Redirected command — recurse so the wrapped command is
+        // checked. C4 (a follow-on fix) will additionally check the
+        // redirect target through the path gate; for now the
+        // segment text used by command-pattern rules is the inner
+        // command without its redirections, matching how opencode
+        // separates the two concerns.
+        "redirected_statement" => {
+            // Find the inner command/pipeline; the redirect operands
+            // are leaf nodes (file_redirect, heredoc_redirect, etc.)
+            // that don't carry shell-command text.
+            for i in 0..node.named_child_count() {
+                if let Some(child) = node.named_child(i) {
+                    match child.kind() {
+                        "command" | "pipeline" | "compound_statement" | "subshell" => {
+                            collect_segments(child, source, out);
+                        }
+                        _ => {} // redirect operands — handled by C4
+                    }
+                }
+            }
+        }
+        "command" => {
             let text = node.utf8_text(source).unwrap_or("").trim().to_string();
             if !text.is_empty() {
                 out.push(text);
