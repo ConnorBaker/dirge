@@ -103,27 +103,37 @@ fn paint_line(buf: &mut Buffer, x: u16, y: u16, width: u16, entry: &LineEntry) {
     buf.set_stringn(x, y, entry.text.as_str(), width as usize, style);
 }
 
-/// Translate a crossterm color into ratatui's equivalent. The two
-/// enums are isomorphic for the variants we use; falls back to
-/// Reset/Reset for anything exotic.
+/// Translate a crossterm color into ratatui's equivalent.
+///
+/// Brightness convention (ANSI 30-37 vs 90-97):
+/// - crossterm: `Dark*` variants are the DIM tones (codes 31..37);
+///   the unprefixed variants (e.g. `Color::Red`) are the BRIGHT
+///   tones (codes 91..97). `DarkGrey` (90) is the exception.
+/// - ratatui: `Red`/`Green`/… are DIM (31..37); `LightRed`/… are
+///   BRIGHT (91..97). `DarkGray` (90) matches crossterm.
+///
+/// So the bright-named crossterm variants map to ratatui's
+/// `Light*`, and the `Dark*` ones map to ratatui's unprefixed.
+/// Earlier versions of this fn had the mapping inverted, which
+/// made the phosphor theme render dim across the board.
 pub fn crossterm_to_ratatui(c: crossterm::style::Color) -> RColor {
     use crossterm::style::Color as CC;
     match c {
         CC::Reset => RColor::Reset,
         CC::Black => RColor::Black,
         CC::DarkGrey => RColor::DarkGray,
-        CC::Red => RColor::Red,
-        CC::DarkRed => RColor::LightRed,
-        CC::Green => RColor::Green,
-        CC::DarkGreen => RColor::LightGreen,
-        CC::Yellow => RColor::Yellow,
-        CC::DarkYellow => RColor::LightYellow,
-        CC::Blue => RColor::Blue,
-        CC::DarkBlue => RColor::LightBlue,
-        CC::Magenta => RColor::Magenta,
-        CC::DarkMagenta => RColor::LightMagenta,
-        CC::Cyan => RColor::Cyan,
-        CC::DarkCyan => RColor::LightCyan,
+        CC::Red => RColor::LightRed,
+        CC::DarkRed => RColor::Red,
+        CC::Green => RColor::LightGreen,
+        CC::DarkGreen => RColor::Green,
+        CC::Yellow => RColor::LightYellow,
+        CC::DarkYellow => RColor::Yellow,
+        CC::Blue => RColor::LightBlue,
+        CC::DarkBlue => RColor::Blue,
+        CC::Magenta => RColor::LightMagenta,
+        CC::DarkMagenta => RColor::Magenta,
+        CC::Cyan => RColor::LightCyan,
+        CC::DarkCyan => RColor::Cyan,
         CC::White => RColor::White,
         CC::Grey => RColor::Gray,
         CC::Rgb { r, g, b } => RColor::Rgb(r, g, b),
@@ -312,15 +322,30 @@ mod tests {
         assert_eq!(read(row_bot, 3), "L24", "bottom visible row should be L24");
     }
 
-    /// crossterm → ratatui color translation covers the common
-    /// theme colors the renderer uses.
+    /// crossterm → ratatui color translation preserves brightness.
+    /// crossterm's `Color::Green` is ANSI 92 (bright); ratatui's
+    /// equivalent is `LightGreen`. crossterm's `DarkGreen` is ANSI
+    /// 32 (dim); ratatui's equivalent is `Green`.
     #[test]
-    fn color_translation_covers_theme_palette() {
-        assert_eq!(crossterm_to_ratatui(CC::Green), RColor::Green);
-        assert_eq!(crossterm_to_ratatui(CC::Cyan), RColor::Cyan);
-        assert_eq!(crossterm_to_ratatui(CC::DarkMagenta), RColor::LightMagenta);
-        assert_eq!(crossterm_to_ratatui(CC::Yellow), RColor::Yellow);
-        assert_eq!(crossterm_to_ratatui(CC::Rgb { r: 1, g: 2, b: 3 }), RColor::Rgb(1, 2, 3));
+    fn color_translation_preserves_brightness() {
+        // Bright crossterm → Light* in ratatui.
+        assert_eq!(crossterm_to_ratatui(CC::Green), RColor::LightGreen);
+        assert_eq!(crossterm_to_ratatui(CC::Red), RColor::LightRed);
+        assert_eq!(crossterm_to_ratatui(CC::Yellow), RColor::LightYellow);
+        assert_eq!(crossterm_to_ratatui(CC::Magenta), RColor::LightMagenta);
+        assert_eq!(crossterm_to_ratatui(CC::Cyan), RColor::LightCyan);
+        // Dim Dark* crossterm → unprefixed in ratatui.
+        assert_eq!(crossterm_to_ratatui(CC::DarkGreen), RColor::Green);
+        assert_eq!(crossterm_to_ratatui(CC::DarkRed), RColor::Red);
+        assert_eq!(crossterm_to_ratatui(CC::DarkMagenta), RColor::Magenta);
+        // DarkGrey (90) is the only "Dark*" that maps to DarkGray.
+        assert_eq!(crossterm_to_ratatui(CC::DarkGrey), RColor::DarkGray);
+        assert_eq!(crossterm_to_ratatui(CC::Grey), RColor::Gray);
+        // RGB + indexed passthrough.
+        assert_eq!(
+            crossterm_to_ratatui(CC::Rgb { r: 1, g: 2, b: 3 }),
+            RColor::Rgb(1, 2, 3)
+        );
         assert_eq!(crossterm_to_ratatui(CC::AnsiValue(42)), RColor::Indexed(42));
     }
 }
