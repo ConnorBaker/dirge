@@ -5271,6 +5271,21 @@ fn render_tool_output(
     let hidden_lines = total_lines.saturating_sub(shown_lines);
 
     let (frame_w, inner) = chamber_widths(renderer);
+    // When the tool returned nothing (or only whitespace), paint a
+    // dim placeholder row so the chamber never appears as a bare
+    // ╭───╮ + ╰───╯ pair. Per-tool wording so it reads naturally
+    // — `glob`/`grep` say "no matches", `read` says "empty file",
+    // everything else falls back to "(no output)".
+    let body_is_empty = char_sliced.trim().is_empty();
+    if body_is_empty {
+        let placeholder = match tool_name {
+            "glob" | "grep" | "find" | "semantic" => "(no matches)",
+            "read" => "(empty file)",
+            "bash" => "(no output)",
+            _ => "(no output)",
+        };
+        renderer.write_line(&chamber_row(placeholder, inner), theme::dim())?;
+    }
     for line in &lines[..shown_lines] {
         renderer.write_line(&chamber_row(line, inner), theme::result())?;
     }
@@ -6076,6 +6091,45 @@ mod tests {
         .expect("render ok");
         let c = collapsed.expect("char-truncation alone must still stash for Ctrl+O");
         assert_eq!(c.full_output.len(), 50_000);
+    }
+
+    /// Empty tool output gets a `(no matches)` / `(empty file)` /
+    /// `(no output)` placeholder row so the chamber never appears
+    /// as a bare ╭───╮ ╰───╯ with nothing between.
+    #[test]
+    fn render_tool_output_empty_body_gets_placeholder() {
+        // glob with no matches → "(no matches)" placeholder.
+        let mut renderer = Renderer::new().expect("renderer");
+        render_tool_output(&mut renderer, "glob", "**/*.nonexistent", "", 10_000, 100)
+            .expect("render ok");
+        let body_text: Vec<&str> = renderer.buffer_lines();
+        assert!(
+            body_text.iter().any(|l| l.contains("(no matches)")),
+            "glob with empty output should show '(no matches)'; got {:?}",
+            body_text
+        );
+
+        // read with whitespace-only file → "(empty file)".
+        let mut renderer = Renderer::new().expect("renderer");
+        render_tool_output(&mut renderer, "read", "empty.txt", "   \n\n  ", 10_000, 100)
+            .expect("render ok");
+        let body_text: Vec<&str> = renderer.buffer_lines();
+        assert!(
+            body_text.iter().any(|l| l.contains("(empty file)")),
+            "read with whitespace-only output should show '(empty file)'; got {:?}",
+            body_text
+        );
+
+        // Unknown tool → generic "(no output)".
+        let mut renderer = Renderer::new().expect("renderer");
+        render_tool_output(&mut renderer, "weird_tool", "x", "", 10_000, 100)
+            .expect("render ok");
+        let body_text: Vec<&str> = renderer.buffer_lines();
+        assert!(
+            body_text.iter().any(|l| l.contains("(no output)")),
+            "unknown tool with empty output should show '(no output)'; got {:?}",
+            body_text
+        );
     }
 
     /// Output that fits in `max_lines` returns None (no collapse
