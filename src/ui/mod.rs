@@ -5341,7 +5341,11 @@ fn render_collapsed_in_full(
 /// area. Capped at 120 so very wide terminals don't produce sprawling
 /// chambers that overwhelm the content.
 fn chamber_widths(renderer: &Renderer) -> (usize, usize) {
-    let term_w = renderer.line_width().max(20);
+    // Match ChatPane's 1-cell right margin (`chat.width - 1`) so
+    // chamber borders don't fall into the reserved margin cell and
+    // get clipped — the symptom was `╮` and `╯` vanishing off the
+    // right edge of GLOB / READ / TASK chambers on a narrow terminal.
+    let term_w = renderer.line_width().max(20).saturating_sub(1);
     let frame_w = term_w.min(120);
     let inner = frame_w.saturating_sub(4); // `│ ` + ` │`
     (frame_w, inner)
