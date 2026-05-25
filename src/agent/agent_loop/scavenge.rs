@@ -20,9 +20,32 @@
 
 use crate::agent::agent_loop::tools::ToolCall;
 
+use std::sync::LazyLock;
+
+use regex::Regex;
+
 /// Maximum input size before we skip scavenging.
 /// Port of `MAX_SCAVENGE_INPUT` (scavenge.ts:18).
 const MAX_SCAVENGE_INPUT: usize = 100 * 1024;
+
+// Module-level compiled regexes to avoid per-call recompilation.
+static RE_DSML_FUNC: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"<[｜|]DSML[｜|]function_calls>[\s\S]*?</?[｜|]DSML[｜|]function_calls>")
+        .expect("DSML function_calls regex must compile")
+});
+static RE_DSML_INVOKE_STRIP: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"<[｜|]DSML[｜|]invoke\s+[^>]*>[\s\S]*?</[｜|]DSML[｜|]invoke>")
+        .expect("DSML invoke strip regex must compile")
+});
+static RE_DSML_INVOKE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"<[｜|]DSML[｜|]invoke\s+name="([^"]+)">([\s\S]*?)</[｜|]DSML[｜|]invoke>"#)
+        .expect("DSML invoke regex must compile")
+});
+static RE_DSML_PARAM: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"<[｜|]DSML[｜|]parameter\s+name="([^"]+)"(?:\s+string="(true|false)")?\s*>([\s\S]*?)</[｜|]DSML[｜|]parameter>"#
+    ).expect("DSML parameter regex must compile")
+});
 
 /// Result of a scavenge pass.
 #[derive(Debug, Clone)]
@@ -103,28 +126,15 @@ struct DsmlInvoke {
 /// Strip DSML blocks so the raw-JSON scanner doesn't re-scavenge
 /// parameter payloads. Port of `stripDsmlBlocks` (scavenge.ts:73-78).
 fn strip_dsml_blocks(text: &str) -> String {
-    use regex::Regex;
-    // Match the full-width pipe (U+FF5C) or ASCII pipe.
-    let re_func =
-        Regex::new(r"<[｜|]DSML[｜|]function_calls>[\s\S]*?</?[｜|]DSML[｜|]function_calls>")
-            .expect("DSML function_calls regex must compile");
-    let re_invoke = Regex::new(r"<[｜|]DSML[｜|]invoke\s+[^>]*>[\s\S]*?</[｜|]DSML[｜|]invoke>")
-        .expect("DSML invoke regex must compile");
-
-    let out = re_func.replace_all(text, "");
-    re_invoke.replace_all(&out, "").to_string()
+    let out = RE_DSML_FUNC.replace_all(text, "");
+    RE_DSML_INVOKE_STRIP.replace_all(&out, "").to_string()
 }
 
 /// Yield every DSML invoke block found in text.
 /// Port of `iterateDsmlInvokes` (scavenge.ts:80-90).
 fn iterate_dsml_invokes(text: &str) -> Vec<DsmlInvoke> {
-    use regex::Regex;
-    let re =
-        Regex::new(r#"<[｜|]DSML[｜|]invoke\s+name="([^"]+)">([\s\S]*?)</[｜|]DSML[｜|]invoke>"#)
-            .expect("DSML invoke regex must compile");
-
     let mut out = Vec::new();
-    for caps in re.captures_iter(text) {
+    for caps in RE_DSML_INVOKE.captures_iter(text) {
         let name = match caps.get(1) {
             Some(m) => m.as_str().to_string(),
             None => continue,
@@ -145,13 +155,8 @@ fn iterate_dsml_invokes(text: &str) -> Vec<DsmlInvoke> {
 /// Port of `parseDsmlParameters` (scavenge.ts:92-113).
 /// Falls back to literal text when `string="false"` JSON parse fails.
 fn parse_dsml_parameters(body: &str) -> serde_json::Value {
-    use regex::Regex;
-    let re = Regex::new(
-        r#"<[｜|]DSML[｜|]parameter\s+name="([^"]+)"(?:\s+string="(true|false)")?\s*>([\s\S]*?)</[｜|]DSML[｜|]parameter>"#
-    ).expect("DSML parameter regex must compile");
-
     let mut map = serde_json::Map::new();
-    for caps in re.captures_iter(body) {
+    for caps in RE_DSML_PARAM.captures_iter(body) {
         let key = match caps.get(1) {
             Some(m) => m.as_str().to_string(),
             None => continue,

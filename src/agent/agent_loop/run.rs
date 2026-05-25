@@ -291,29 +291,9 @@ pub async fn run_loop(
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            let assistant_text: String = assistant_msg
-                .content
-                .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            let combined = if reasoning_text.is_empty() {
-                if assistant_text.is_empty() {
-                    None
-                } else {
-                    Some(assistant_text)
-                }
-            } else if assistant_text.is_empty() {
-                Some(reasoning_text)
-            } else {
-                Some(format!("{}\n{}", reasoning_text, assistant_text))
-            };
-            if let Some(scan_text) = combined.as_deref() {
+            if !reasoning_text.is_empty() {
                 let scavenge_result =
-                    super::scavenge::scavenge_tool_calls(Some(scan_text), &allowed_names, 4);
+                    super::scavenge::scavenge_tool_calls(Some(&reasoning_text), &allowed_names, 4);
                 if !scavenge_result.calls.is_empty() {
                     let seen_signatures: std::collections::HashSet<String> = tool_calls
                         .iter()
