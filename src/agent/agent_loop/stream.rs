@@ -208,7 +208,11 @@ pub async fn stream_assistant_response(
                     })
                     .await;
             }
-            StreamEvent::Done { reason, message, usage } => {
+            StreamEvent::Done {
+                reason,
+                message,
+                usage,
+            } => {
                 let mut finalised = message;
                 finalised.stop_reason = reason;
                 finalize(context, &finalised, added_partial, emit).await;

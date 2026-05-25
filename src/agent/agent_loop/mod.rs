@@ -63,8 +63,7 @@ pub use integration::{
 };
 pub use message::{
     AssistantMessage, ContentBlock, DeltaPhase, LoopEvent, LoopMessage, StopReason, StreamEvent,
-    TokenUsage,
-    ToolResultMessage, UserMessage,
+    TokenUsage, ToolResultMessage, UserMessage,
 };
 #[cfg(feature = "plugin")]
 pub use plugin_hooks::{after_hook_from_plugin_manager, before_hook_from_plugin_manager};

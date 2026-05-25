@@ -58,7 +58,7 @@ Hermes has four layers that work together. We port all of them, adapted:
 
 ---
 
-## Phase 0 — Per-Project `.dirge/` Storage Infrastructure
+## Phase 0 — Per-Project `.dirge/` Storage Infrastructure and Review
 
 **Goal**: establish the `.dirge/` directory as the per-project equivalent
 of `~/.hermes/`. Every other phase writes into this tree.
@@ -81,6 +81,12 @@ or explicit override via `DIRGE_PROJECT_ROOT` env var).
 **Tests**: project root detection, env var override, lazy directory creation.
 
 **Risk**: zero. Pure path resolution.
+
+We need to review current features like memories to identified ones that would be
+logically replaced by this system and flag anything that would be duplicate for
+removal after. If the features serve a different purpose then keep them. If they
+conflict or duplicate functionality we are introducing then remove or merge functionality
+as is sensible.
 
 ---
 

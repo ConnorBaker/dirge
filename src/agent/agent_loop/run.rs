@@ -716,7 +716,7 @@ mod tests {
             Box::pin(futures::stream::iter(vec![StreamEvent::Done {
                 reason,
                 message: msg,
-            usage: None,
+                usage: None,
             }]))
         })
     }
@@ -959,7 +959,7 @@ mod tests {
             Box::pin(futures::stream::iter(vec![StreamEvent::Done {
                 reason,
                 message: msg,
-            usage: None,
+                usage: None,
             }]))
         });
 
@@ -1069,7 +1069,7 @@ mod tests {
             Box::pin(futures::stream::iter(vec![StreamEvent::Done {
                 reason: StopReason::ToolUse,
                 message: msg,
-            usage: None,
+                usage: None,
             }]))
         });
 
@@ -1107,7 +1107,7 @@ mod tests {
             Box::pin(futures::stream::iter(vec![StreamEvent::Done {
                 reason: StopReason::ToolUse,
                 message: msg,
-            usage: None,
+                usage: None,
             }]))
         });
 
@@ -1160,7 +1160,7 @@ mod tests {
             Box::pin(futures::stream::iter(vec![StreamEvent::Done {
                 reason,
                 message: msg,
-            usage: None,
+                usage: None,
             }]))
         });
 
@@ -1239,7 +1239,7 @@ mod tests {
             Box::pin(futures::stream::iter(vec![StreamEvent::Done {
                 reason,
                 message: msg,
-            usage: None,
+                usage: None,
             }]))
         });
 
@@ -1485,7 +1485,7 @@ mod tests {
                 crate::agent::agent_loop::message::StreamEvent::Done {
                     reason,
                     message: msg,
-                usage: None,
+                    usage: None,
                 },
             ]))
         });
@@ -1583,7 +1583,7 @@ mod tests {
                 crate::agent::agent_loop::message::StreamEvent::Done {
                     reason,
                     message: msg,
-                usage: None,
+                    usage: None,
                 },
             ]))
         });

@@ -406,7 +406,7 @@ mod tests {
             Box::pin(futures::stream::iter(vec![StreamEvent::Done {
                 reason,
                 message: msg,
-            usage: None,
+                usage: None,
             }]))
         });
 

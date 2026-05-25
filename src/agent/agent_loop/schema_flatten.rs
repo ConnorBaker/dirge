@@ -66,7 +66,11 @@ pub fn nest_arguments(flat_args: &Value) -> Value {
             let mut out = serde_json::Map::new();
             for (key, value) in map {
                 let path: Vec<String> = split_flat_key(key);
-                set_by_path(&mut out, path.iter().map(|s| s.as_str()).collect(), value.clone());
+                set_by_path(
+                    &mut out,
+                    path.iter().map(|s| s.as_str()).collect(),
+                    value.clone(),
+                );
             }
             Value::Object(out)
         }
@@ -170,9 +174,7 @@ fn set_by_path(target: &mut serde_json::Map<String, Value>, path: Vec<&str>, val
         if i == last {
             cur.insert(key.to_string(), value.clone());
         } else {
-            let needs_object = cur
-                .get(&key.to_string())
-                .map_or(true, |v| !v.is_object());
+            let needs_object = cur.get(&key.to_string()).map_or(true, |v| !v.is_object());
             if needs_object {
                 // Conflicting or missing intermediate — overwrite with object.
                 if cur.get(&key.to_string()).is_some() {
