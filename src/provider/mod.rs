@@ -78,6 +78,10 @@ pub struct ProviderInfo {
     pub kind: ProviderKind,
     pub base_url: Option<String>,
     pub api_key_env: Option<String>,
+    /// Literal API key resolved from `entry.api_key` (with `${VAR}`
+    /// already expanded). When present, takes precedence over both
+    /// `api_key_env` and the standard env-var fallback chain.
+    pub api_key_literal: Option<String>,
 }
 
 pub fn resolve_provider_info(
@@ -108,10 +112,25 @@ pub fn resolve_provider_info(
             eprintln!("error: {err}");
             return None;
         }
+        let api_key_literal = match entry.resolved_api_key() {
+            Some(Ok(k)) => Some(k),
+            Some(Err(missing)) => {
+                tracing::error!(
+                    target: "dirge::provider",
+                    "provider '{name}' references env var ${{{missing}}} via api_key but it is unset",
+                );
+                eprintln!(
+                    "error: provider '{name}' references env var ${{{missing}}} via api_key but it is unset"
+                );
+                None
+            }
+            None => None,
+        };
         return Some(ProviderInfo {
             kind,
             base_url: entry.base_url.clone(),
             api_key_env: entry.api_key_env.clone(),
+            api_key_literal,
         });
     }
     // Then plugin-registered providers from `harness/register-provider`.
@@ -130,10 +149,25 @@ pub fn resolve_provider_info(
             eprintln!("error: {err}");
             return None;
         }
+        let api_key_literal = match entry.resolved_api_key() {
+            Some(Ok(k)) => Some(k),
+            Some(Err(missing)) => {
+                tracing::error!(
+                    target: "dirge::provider",
+                    "plugin provider '{name}' references env var ${{{missing}}} via api_key but it is unset",
+                );
+                eprintln!(
+                    "error: plugin provider '{name}' references env var ${{{missing}}} via api_key but it is unset"
+                );
+                None
+            }
+            None => None,
+        };
         return Some(ProviderInfo {
             kind,
             base_url: entry.base_url,
             api_key_env: entry.api_key_env,
+            api_key_literal,
         });
     }
     let kind = parse_provider(name)?;
@@ -141,6 +175,7 @@ pub fn resolve_provider_info(
         kind,
         base_url: None,
         api_key_env: None,
+        api_key_literal: None,
     })
 }
 

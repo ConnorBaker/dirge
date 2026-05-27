@@ -258,11 +258,19 @@ impl Cli {
         self.max_tokens.or(cfg.max_tokens).unwrap_or(8192)
     }
 
-    /// Model temperature with CLI > config > unset precedence. Clamped
-    /// to `[0.0, 2.0]` by the caller (builder) so a typo'd config
-    /// can't push the provider into an unsupported range.
+    /// Model temperature with `CLI > providers.<default>.options.temperature >
+    /// config.temperature > unset` precedence. Clamped to `[0.0, 2.0]` by
+    /// the caller (builder).
     pub fn resolve_temperature(&self, cfg: &config::Config) -> Option<f64> {
-        self.temperature.or(cfg.temperature)
+        if let Some(t) = self.temperature {
+            return Some(t);
+        }
+        if let Some((_, entry)) = cfg.resolve_role(config::ConfigRole::Default)
+            && let Some(t) = entry.options_temperature()
+        {
+            return Some(t);
+        }
+        cfg.temperature
     }
 
     pub fn resolve_max_agent_turns(&self, cfg: &config::Config) -> usize {

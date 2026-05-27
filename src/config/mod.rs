@@ -27,7 +27,16 @@ pub struct ProviderEntry {
     pub provider_type: Option<String>,
     pub base_url: Option<String>,
     pub model: Option<String>,
+    /// Name of the env var holding the API key. Kept for backward
+    /// compatibility — prefer `api_key` with `${VAR}` interpolation
+    /// for clarity.
     pub api_key_env: Option<String>,
+    /// API key for this provider. Accepts a literal key OR shell-style
+    /// `${ENV_VAR}` interpolation (expanded at use time). Takes
+    /// precedence over `api_key_env`. Accepts both `api_key` and
+    /// `apiKey` in the JSON.
+    #[serde(alias = "apiKey")]
+    pub api_key: Option<String>,
     /// Set to true to allow `http://` URLs (insecure). Default false —
     /// only `https://` is accepted. Non-https endpoints send every
     /// prompt, file content, and tool result in plaintext over the
@@ -38,6 +47,37 @@ pub struct ProviderEntry {
     /// units / semantics as the top-level `stream_chunk_timeout_secs`
     /// but takes precedence for this specific provider.
     pub stream_chunk_timeout_secs: Option<u64>,
+    /// Per-provider model options. Free-form map; known keys are
+    /// honored by the request builder, unknown keys are ignored.
+    /// Currently honored: `temperature` (f64, overrides cfg/CLI for
+    /// requests routed through this provider).
+    pub options: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+impl ProviderEntry {
+    /// Resolve the API key declared on this entry, expanding
+    /// `${VAR}` interpolation against the process environment.
+    /// Returns:
+    /// - `Some(Ok(key))` when a literal or successfully-expanded key is available
+    /// - `Some(Err(missing_var))` when `${VAR}` is configured but the env var is unset
+    /// - `None` when no `api_key` is configured on the entry
+    pub fn resolved_api_key(&self) -> Option<Result<String, String>> {
+        let raw = self.api_key.as_deref()?;
+        if let Some(name) = raw.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+            match std::env::var(name) {
+                Ok(v) if !v.is_empty() => Some(Ok(v)),
+                _ => Some(Err(name.to_string())),
+            }
+        } else {
+            Some(Ok(raw.to_string()))
+        }
+    }
+
+    /// `options.temperature` as an f64 when set. Other shapes (string,
+    /// integer, missing) return `None`.
+    pub fn options_temperature(&self) -> Option<f64> {
+        self.options.as_ref()?.get("temperature")?.as_f64()
+    }
 }
 
 /// Logical role a provider can be assigned to. Used by
@@ -816,6 +856,111 @@ mod provider_role_tests {
         assert_eq!(
             ollama.base_url.as_deref(),
             Some("http://127.0.0.1:11434/v1")
+        );
+    }
+
+    /// `api_key` accepts both snake_case and `apiKey` camelCase. A literal
+    /// passes through; a `${VAR}` form expands against the env at call
+    /// time.
+    #[test]
+    fn api_key_literal_passes_through() {
+        let cfg = cfg_with_providers(
+            r#"{
+                "providers": { "glm": { "api_key": "sk-literal" } }
+            }"#,
+        );
+        let entry = cfg.providers_map().get("glm").cloned().unwrap();
+        assert_eq!(
+            entry.resolved_api_key().and_then(|r| r.ok()),
+            Some("sk-literal".to_string())
+        );
+    }
+
+    #[test]
+    fn api_key_camel_case_alias_parses() {
+        let cfg = cfg_with_providers(
+            r#"{
+                "providers": { "glm": { "apiKey": "sk-camel" } }
+            }"#,
+        );
+        let entry = cfg.providers_map().get("glm").cloned().unwrap();
+        assert_eq!(entry.api_key.as_deref(), Some("sk-camel"));
+    }
+
+    #[test]
+    fn api_key_env_interpolation_expands() {
+        // SAFETY: tests in this module are inside the same process so
+        // setting an env var is racy across threads. Use a uniquely-
+        // named var so a concurrent test doesn't observe ours.
+        let var = "DIRGE_TEST_API_KEY_EXPAND";
+        unsafe { std::env::set_var(var, "sk-from-env") };
+        let cfg = cfg_with_providers(&format!(
+            r#"{{
+                "providers": {{ "glm": {{ "api_key": "${{{var}}}" }} }}
+            }}"#
+        ));
+        let entry = cfg.providers_map().get("glm").cloned().unwrap();
+        assert_eq!(
+            entry.resolved_api_key().and_then(|r| r.ok()),
+            Some("sk-from-env".to_string())
+        );
+        unsafe { std::env::remove_var(var) };
+    }
+
+    #[test]
+    fn api_key_env_interpolation_reports_missing_var() {
+        let cfg = cfg_with_providers(
+            r#"{
+                "providers": { "glm": { "api_key": "${DIRGE_TEST_MISSING_VAR_NEVER_SET}" } }
+            }"#,
+        );
+        let entry = cfg.providers_map().get("glm").cloned().unwrap();
+        let err = entry.resolved_api_key().unwrap().unwrap_err();
+        assert_eq!(err, "DIRGE_TEST_MISSING_VAR_NEVER_SET");
+    }
+
+    #[test]
+    fn api_key_none_when_unset() {
+        let entry = ProviderEntry::default();
+        assert!(entry.resolved_api_key().is_none());
+    }
+
+    /// `options.temperature` is honored as f64. Other types in the
+    /// same slot return None.
+    #[test]
+    fn options_temperature_f64() {
+        let cfg = cfg_with_providers(
+            r#"{
+                "providers": { "glm": { "options": { "temperature": 0.2 } } }
+            }"#,
+        );
+        let entry = cfg.providers_map().get("glm").cloned().unwrap();
+        assert_eq!(entry.options_temperature(), Some(0.2));
+    }
+
+    #[test]
+    fn options_temperature_missing_or_wrong_shape() {
+        let cfg = cfg_with_providers(
+            r#"{
+                "providers": {
+                    "no-options":  {},
+                    "wrong-shape": { "options": { "temperature": "hot" } }
+                }
+            }"#,
+        );
+        assert_eq!(
+            cfg.providers_map()
+                .get("no-options")
+                .unwrap()
+                .options_temperature(),
+            None
+        );
+        assert_eq!(
+            cfg.providers_map()
+                .get("wrong-shape")
+                .unwrap()
+                .options_temperature(),
+            None
         );
     }
 

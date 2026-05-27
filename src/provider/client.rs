@@ -26,7 +26,14 @@ pub(crate) fn create_client(
         )
     })?;
 
-    let key = resolve_api_key(info.kind, info.api_key_env.as_deref(), api_key)?;
+    // Precedence: CLI `--api-key` > `entry.api_key` (literal or
+    // `${VAR}`-expanded) > `entry.api_key_env` > default env var
+    // for the kind > kind-specific fallback env vars.
+    let key = match (api_key, info.api_key_literal.as_deref()) {
+        (Some(k), _) if !k.is_empty() => k.to_string(),
+        (_, Some(k)) if !k.is_empty() => k.to_string(),
+        _ => resolve_api_key(info.kind, info.api_key_env.as_deref(), api_key)?,
+    };
 
     let base_url = match info.kind {
         ProviderKind::DeepSeek => Some(
