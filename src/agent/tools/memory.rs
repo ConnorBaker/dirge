@@ -377,4 +377,85 @@ mod tests {
         assert!(def.description.contains("memory"));
         assert!(def.description.contains("pitfalls"));
     }
+
+    /// End-to-end: every action the SYSTEM_PROMPT names for the memory
+    /// tool must succeed against a real MemoryTool with valid args.
+    /// If this fails, the prompt is lying to the model. See dirge-yqmo.
+    #[test]
+    fn integration_prompt_actions_all_executable() {
+        use crate::agent::prompt::SYSTEM_PROMPT;
+
+        let memory_line = SYSTEM_PROMPT
+            .lines()
+            .find(|l| l.trim_start().starts_with("- memory:"))
+            .expect("SYSTEM_PROMPT should describe the memory tool");
+
+        // Extract candidate action words from the prompt.
+        let known_actions = ["view", "add", "replace", "remove"];
+        let prompt_actions: Vec<&str> = known_actions
+            .iter()
+            .copied()
+            .filter(|a| {
+                memory_line
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .any(|w| w == *a)
+            })
+            .collect();
+        assert_eq!(
+            prompt_actions.len(),
+            known_actions.len(),
+            "prompt should list all real actions; got {:?}",
+            prompt_actions
+        );
+
+        let (store, _dir) = temp_store();
+        let tool = MemoryTool::new(store, None, None);
+        let rt = make_runtime();
+
+        // Seed an entry so replace/remove have something to match.
+        rt.block_on(tool.call(Args {
+            action: "add".into(),
+            target: "memory".into(),
+            content: Some("seed: build command cargo test".into()),
+            old_text: None,
+        }))
+        .expect("seed add should succeed");
+
+        for action in &prompt_actions {
+            let args = match *action {
+                "view" => Args {
+                    action: "view".into(),
+                    target: "memory".into(),
+                    content: None,
+                    old_text: None,
+                },
+                "add" => Args {
+                    action: "add".into(),
+                    target: "memory".into(),
+                    content: Some(format!("entry-for-{}", action)),
+                    old_text: None,
+                },
+                "replace" => Args {
+                    action: "replace".into(),
+                    target: "memory".into(),
+                    content: Some("seed: build command cargo test --release".into()),
+                    old_text: Some("seed:".into()),
+                },
+                "remove" => Args {
+                    action: "remove".into(),
+                    target: "memory".into(),
+                    content: None,
+                    old_text: Some("entry-for-add".into()),
+                },
+                _ => unreachable!(),
+            };
+            let result = rt.block_on(tool.call(args));
+            assert!(
+                result.is_ok(),
+                "prompt-advertised action '{}' failed end-to-end: {:?}",
+                action,
+                result
+            );
+        }
+    }
 }

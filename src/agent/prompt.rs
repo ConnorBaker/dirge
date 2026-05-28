@@ -84,7 +84,7 @@ Available tools:
 - question: Ask the user structured questions when you need clarification, decisions, or preferences. Blocks until user answers.
 - plan_enter / plan_exit: Suggest switching to/from plan mode for complex tasks. User must confirm.
 - task: Spawn a subagent for research/analysis subtasks. Set background=true for async — completion arrives as <system-reminder> on your next turn. Do NOT poll task_status.
-- memory: Persistent per-project knowledge. Actions: view (list or read one), write (create/update), delete.
+- memory: Persistent per-project knowledge for project facts and pitfalls. Actions: view (read entries in a target), add (append a new entry; needs content), replace (rewrite an entry matched by old_text substring; needs old_text and content), remove (drop an entry matched by old_text substring; needs old_text). Targets: 'memory' for facts/conventions/build commands, 'pitfalls' for anti-patterns and things tried and failed.
 - skill: Load a skill by name to get detailed instructions for a specific task or domain.";
 
 pub const TODO_TOOLS_PROMPT: &str = "\
@@ -249,5 +249,49 @@ mod tests {
         assert!(stripped.contains("before"));
         assert!(stripped.contains("middle"));
         assert!(stripped.contains("after"));
+    }
+
+    /// The system prompt's `memory:` tool line must only mention action
+    /// names that the real `MemoryTool` schema accepts. If they diverge,
+    /// a model that follows the prompt and calls an unsupported action
+    /// gets `Unknown action '...'` from the tool. See dirge-yqmo.
+    #[test]
+    fn memory_tool_prompt_actions_match_schema() {
+        // Authoritative list — must stay in sync with
+        // `src/agent/tools/memory.rs` schema enum and the match arms in
+        // `MemoryTool::call`.
+        let real_actions = ["view", "add", "replace", "remove"];
+        let forbidden_actions = ["write", "delete", "create", "update"];
+
+        // Locate the `- memory:` bullet in SYSTEM_PROMPT.
+        let memory_line = SYSTEM_PROMPT
+            .lines()
+            .find(|l| l.trim_start().starts_with("- memory:"))
+            .expect("SYSTEM_PROMPT should describe the memory tool");
+
+        // Split into words on whitespace and punctuation so substring
+        // matches (e.g. "rewrite" containing "write") don't mask the
+        // schema check.
+        let words: Vec<&str> = memory_line
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        for forbidden in forbidden_actions {
+            assert!(
+                !words.iter().any(|w| *w == forbidden),
+                "memory tool prompt mentions unsupported action '{}': {}",
+                forbidden,
+                memory_line
+            );
+        }
+        for action in real_actions {
+            assert!(
+                words.iter().any(|w| *w == action),
+                "memory tool prompt missing real action '{}': {}",
+                action,
+                memory_line
+            );
+        }
     }
 }
