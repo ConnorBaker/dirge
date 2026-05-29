@@ -41,6 +41,11 @@ pub enum CompactionKind {
     /// Pruning + a failed summary (error or invalid) — fell back to the
     /// pruned context.
     PruneAndFailedSummary,
+    /// Pruning only because the summarizer circuit breaker is OPEN (it
+    /// failed too many times this run). Distinct from `PruneOnly` so the
+    /// ongoing-failure signal stays visible after the breaker latches
+    /// rather than masquerading as a healthy no-summarizer deployment.
+    PruneSummarizerDisabled,
 }
 
 #[derive(Debug, Clone)]
