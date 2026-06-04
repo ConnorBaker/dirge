@@ -211,15 +211,20 @@ pub fn merge_worktree(info: &WorktreeInfo, target: &str) -> Result<(), String> {
     }
 
     // Switch the main repo to the target branch (prefer `switch`, fall
-    // back to `checkout` on older git). `--` guards the ref name.
-    git_in(main, &["switch", "--", target])
-        .or_else(|_| git_in(main, &["checkout", "--", target]))
+    // back to `checkout` on older git). NOTE: no `--` separator here —
+    // for `switch`/`checkout`/`merge` a `--` forces the following token to
+    // be read as a PATHSPEC, not a branch/ref (e.g. `git checkout -- main`
+    // restores a file named `main` instead of switching branches), and its
+    // handling is git-version-dependent. `validate_branch_name` above
+    // already rejects flag-shaped / metachar names, so the bare ref is safe.
+    git_in(main, &["switch", target])
+        .or_else(|_| git_in(main, &["checkout", target]))
         .map_err(|e| format!("failed to switch main repo to '{target}': {e}"))?;
 
     // --no-ff keeps the worktree's history explicit. On any failure
     // (conflict or otherwise) abort so the index/working tree are
     // restored to the pre-merge state.
-    if let Err(e) = git_in(main, &["merge", "--no-ff", "--", &info.branch]) {
+    if let Err(e) = git_in(main, &["merge", "--no-ff", &info.branch]) {
         let _ = git_in(main, &["merge", "--abort"]);
         return Err(format!(
             "merge of '{}' into '{target}' could not complete cleanly and was aborted — \
