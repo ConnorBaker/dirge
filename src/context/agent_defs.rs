@@ -65,9 +65,13 @@ impl ToolPolicy {
     /// Convert to the deny-list shape consumed by the permission layer
     /// (`current_prompt_deny_tools` / `apply_prompt_deny`). `Allow` is
     /// realized as "deny every built-in not in the allow-list" over
-    /// `builtins` — best-effort for built-in tools; MCP/plugin tools are not
-    /// enumerable here, so an `allow` list does not restrict them (use `deny`
-    /// for a hard cap). Names are lowercased to match the permission layer.
+    /// `builtins`. Because `builtins` (`BUILTIN_TOOL_NAMES`) includes the
+    /// `mcp_tool` and `plugin_tool` umbrella names, an `allow` list that
+    /// omits them also denies ALL MCP and plugin tools wholesale — so
+    /// `allow_tools` is a genuine cap (dirge-74nb). It cannot, however,
+    /// allow-list a SPECIFIC MCP/plugin tool by name (those aren't
+    /// enumerable here); to permit one, allow its umbrella (`mcp_tool` /
+    /// `plugin_tool`). Names are lowercased to match the permission layer.
     #[allow(dead_code)] // consumed by `/agent` switching
     pub fn to_deny_list(&self, builtins: &[&str]) -> Vec<String> {
         match self {
@@ -424,6 +428,34 @@ mod tests {
         let mut got = ToolPolicy::Allow(vec!["read".into()]).to_deny_list(&builtins);
         got.sort();
         assert_eq!(got, vec!["bash", "edit", "write"]);
+    }
+
+    /// dirge-74nb: over the REAL builtin set, an `allow_tools` list that
+    /// omits the umbrellas denies all MCP *and* plugin tools — `allow_tools`
+    /// is a genuine cap, not a built-ins-only filter.
+    #[test]
+    fn allow_tools_caps_mcp_and_plugin_via_umbrellas() {
+        let deny = ToolPolicy::Allow(vec!["read".into(), "grep".into()])
+            .to_deny_list(crate::agent::tools::BUILTIN_TOOL_NAMES);
+        assert!(
+            deny.iter().any(|d| d == "mcp_tool"),
+            "MCP umbrella must be denied"
+        );
+        assert!(
+            deny.iter().any(|d| d == "plugin_tool"),
+            "plugin umbrella must be denied (dirge-74nb)"
+        );
+        // The allowed tools are NOT denied.
+        assert!(!deny.iter().any(|d| d == "read"));
+        assert!(!deny.iter().any(|d| d == "grep"));
+
+        // Explicitly allowing an umbrella keeps that whole class callable.
+        let deny = ToolPolicy::Allow(vec!["read".into(), "plugin_tool".into()])
+            .to_deny_list(crate::agent::tools::BUILTIN_TOOL_NAMES);
+        assert!(
+            !deny.iter().any(|d| d == "plugin_tool"),
+            "allowed umbrella stays callable"
+        );
     }
 
     #[test]

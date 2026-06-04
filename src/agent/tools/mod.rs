@@ -130,8 +130,17 @@ pub const BUILTIN_TOOL_NAMES: &[&str] = &[
     // `mcp_tool` is the umbrella name McpTool calls go through.
     // Including it lets a prompt's `deny_tools: [mcp_tool]` deny
     // every MCP server's tools wholesale; the warn-on-unknown gate
-    // in `context/prompts.rs` then accepts that entry.
+    // in `context/prompts.rs` then accepts that entry. It also makes
+    // an agent-profile `allow_tools` list a real cap over MCP (the
+    // `Allow→deny` conversion denies every builtin name not allowed,
+    // and `mcp_tool` is one such name).
     "mcp_tool",
+    // `plugin_tool` is the umbrella for Janet plugin-registered tools
+    // (see `JanetLoopTool::execute`, dirge-rfix). Listing it here — like
+    // `mcp_tool` — lets `deny_tools: [plugin_tool]` block every plugin
+    // tool, and makes `allow_tools` restrict plugin tools too (dirge-74nb)
+    // rather than silently leaving them all callable.
+    "plugin_tool",
 ];
 
 #[derive(Debug, thiserror::Error)]
