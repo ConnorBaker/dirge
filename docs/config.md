@@ -66,7 +66,9 @@ Accepted top-level keys:
 | `escalation_provider`     | string  | Provider alias for the one-shot retry after repair-exhaustion / pre-write syntax failure. Falls back to `provider` (no-op when equal). |
 | `summarization_provider`  | string  | Provider alias for context compaction. Falls back to `provider`. |
 | `subagent_provider`       | string  | Provider alias for `task` tool subagents. Falls back to `provider`. |
-| `critic_provider`         | string  | Provider alias for the F6 in-loop critic (tier 3). When set, the verifier escalates to a bounded LLM critique at finalization on substantive runs (one call per run). **No fallback** — unset means no critic and no cost. |
+| `critic_provider`         | string  | Provider alias for the F6 in-loop critic (tier 3). When set, the verifier escalates to a bounded LLM critique at finalization on substantive runs (one call per run), and it also serves as the judge for the **goal gate** (`--goal`). **No fallback** — unset means no critic, no goal gate, and no cost. |
+| `compaction_fold_threshold` | float | Fraction of the context window (0.3–0.75) at which history folds into a summary — and the durable checkpoint is written. Lower folds/checkpoints earlier, from more coherent context. Unset keeps the 0.75 default. |
+| `incremental_checkpoint`  | bool    | Refresh the durable session checkpoint in the background at 20%-of-window usage thresholds, without folding, so a resumed session recovers fresh state (adapted from [MiMo-Code](https://github.com/XiaomiMiMo/MiMo-Code)). Default `true`; set `false` to disable the background summary calls. Forced off in headless `-p`/`--loop` (nothing there persists it). |
 | `agents`                  | object  | Optional user-defined [agent profiles](agents.md), keyed by name. Each is a `{ prompt, model, deny_tools/allow_tools, reasoning, temperature, description }` bundle activated at runtime with `/agent <name>`. Lowest-precedence source — `.dirge/agents/*.md` and `~/.config/dirge/agents/*.md` override same-named entries. Absent = no profiles (opt-in). |
 | `max_tokens`              | integer | Maximum response tokens. Default: `8192`.                                                                                                                                   |
 | `max_agent_turns`         | integer | Maximum agent turns per response. Default: `100`.                                                                                                                           |
@@ -154,7 +156,7 @@ role-assignment keys.
 | `escalation_provider` | One-shot retry after repair-exhaustion / pre-write syntax failure | `provider` (no-op when equal) |
 | `summarization_provider` | Context compaction | `provider` |
 | `subagent_provider` | `task` tool subagents | `provider` |
-| `critic_provider` | F6 in-loop critic (tier 3) | none (off) |
+| `critic_provider` | F6 in-loop critic (tier 3) + goal-gate judge (`--goal`) | none (off) |
 
 When a role's provider equals `provider` (either explicitly or by fallback), no
 duplicate client is constructed and the feature has zero overhead — escalation
