@@ -6,10 +6,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-19
+
 ### Added
 - **`show_reasoning` config flag.** Set it to `true` to make the model's
   thinking visible by default instead of pressing `Ctrl+O` each turn. Defaults
   to `false` (unchanged behavior); `Ctrl+O` still toggles per session. (#461)
+- **Nix flake.** `nix build` / `nix run` build dirge from source, `nix develop`
+  opens a Rust dev shell, and `nix build .#dirge-bin` installs the prebuilt
+  release binary. Ships an overlay and `.envrc` for direnv, and supports
+  x86_64/aarch64 on both Linux and macOS. A release-tag workflow refreshes
+  `nix/bin.nix` hashes and opens a PR. (#462, #466)
+
+### Fixed
+- **Compaction no longer 400s under Anthropic OAuth.** dirge injects
+  `role:"system"` entries into `messages[]` for compaction summaries and
+  mid-session memory re-injection. The OAuth shaper only normalized the
+  top-level `system` field, so a stray system turn reached the wire and the
+  Claude-Code classifier rejected it as third-party traffic ("extra usage" 400)
+  right after every compaction. System-role `messages[]` entries are now folded
+  into the top-level `system` block first. (#463)
+- **Global-tier skills are advertised in the system prompt.** The skill catalog
+  listed only the project-local `.dirge/skills/`, while the `skill` tool could
+  load from the global tiers too — so a globally installed skill was loadable
+  but never advertised. The catalog now lists from the same source as the tool
+  (`discover_skills`). (#464)
 
 ## [0.8.1] - 2026-06-18
 
