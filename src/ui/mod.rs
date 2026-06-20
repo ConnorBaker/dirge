@@ -78,7 +78,7 @@ use crate::ui::chat_state::{ChatUiState, load_chat_ui_state, save_chat_ui_state}
 use crate::ui::colors::{c_agent, c_error, c_perm, c_tool};
 use crate::ui::events::{render_session, sanitize_output};
 use crate::ui::input::InputEditor;
-use crate::ui::keymap::{KeyAction, Keymap};
+use crate::ui::keymap::{KeyAction, Keymaps};
 use crate::ui::panel_render::{build_left_panel_info, build_panel_data};
 use crate::ui::renderer::{LineEntry, Renderer};
 use crate::ui::search_rewind::{
@@ -206,12 +206,33 @@ pub async fn run_interactive(
     // and a ring of the most recent tool actions for the [ACTIVITY]
     // ticker. Both feed `build_left_panel_info` each loop tick.
     let gitstat = crate::ui::gitstatus::spawn_poller(std::time::Duration::from_secs(3));
-    // Configurable global key bindings (VSCode-style): defaults layered
-    // with the user's `keybindings` config. Surface any parse warnings.
-    let (keymap, keymap_warnings) = Keymap::from_config(cfg.keybindings.as_deref());
+    // Configurable key bindings (VSCode-style): defaults layered with the
+    // user's `keybindings` config, covering BOTH the global command keys
+    // and the input-editor keys (dirge-xv9l). Plugin keybindings (#476,
+    // dirge-rj3k) layer between the two: defaults < plugins < user config,
+    // so the user's config always wins. A plugin binds via
+    // `harness/bind-key`. Surface any parse warnings.
+    let mut merged_keybindings: Vec<crate::config::KeybindingConfig> = Vec::new();
+    #[cfg(feature = "plugin")]
+    if let Some(pm) = crate::plugin::hook::global() {
+        for (key, command) in pm.lock_ignore_poison().list_keybindings() {
+            merged_keybindings.push(crate::config::KeybindingConfig { key, command });
+        }
+    }
+    if let Some(user) = cfg.keybindings.as_deref() {
+        merged_keybindings.extend(user.iter().cloned());
+    }
+    let (keymaps, keymap_warnings) = Keymaps::from_config(Some(&merged_keybindings));
     for w in &keymap_warnings {
         eprintln!("warning: {w}");
     }
+    let keymap = keymaps.global;
+    input.set_keymap(keymaps.input);
+    // Pending prefix of an in-progress emacs-style chord sequence (#234).
+    // Empty unless the user has pressed the first key(s) of a multi-key
+    // global binding (e.g. `ctrl-x` of `ctrl-x ctrl-s`); shown in the
+    // footer and cleared on completion, abort, or Esc/Ctrl+G.
+    let mut chord_pending: Vec<crate::ui::keymap::Chord> = Vec::new();
     const TOOL_ACTIVITY_CAP: usize = 8;
     // Seed the editor's history from the session so Up/Down arrow
     // navigation and Ctrl+F search work across restarts.
@@ -529,6 +550,17 @@ pub async fn run_interactive(
                 ),
                 ui.interjection_len(),
             );
+            // #234: while a chord sequence is mid-entry, echo the pending
+            // prefix in the footer (emacs-style `C-x-`) so the user knows
+            // the key was captured and more is expected.
+            let status = if chord_pending.is_empty() {
+                status
+            } else {
+                format!(
+                    "{status}  {}-",
+                    crate::ui::keymap::chord_seq_label(&chord_pending)
+                )
+            };
             renderer.set_bottom(&input, &status, ui.is_running);
             renderer.flush()?;
         }};
@@ -1331,14 +1363,79 @@ pub async fn run_interactive(
                         continue;
                     }
                     UserEvent::Key(key) => {
+                        // #234 chord-sequence runtime (global commands). While
+                        // a prefix is pending, Esc / Ctrl+G cancels it (before
+                        // the Esc/Ctrl+C panic gesture below). Then accumulate
+                        // the chord and classify against the global sequence
+                        // map: a proper prefix is held (swallowed) and echoed
+                        // in the footer; an exact multi-key match resolves to
+                        // its action and flows through the normal dispatch; a
+                        // non-match aborts any pending prefix and the key is
+                        // handled normally (possibly starting a fresh sequence).
+                        let chord: crate::ui::keymap::Chord = (key.code, key.modifiers);
+                        if !chord_pending.is_empty()
+                            && (key.code == KeyCode::Esc
+                                || (key.code == KeyCode::Char('g')
+                                    && key.modifiers.contains(KeyModifiers::CONTROL)))
+                        {
+                            chord_pending.clear();
+                            renderer.request_repaint();
+                            continue;
+                        }
+                        let mut seq_action: Option<KeyAction> = None;
+                        {
+                            use crate::ui::keymap::SeqClass;
+                            let mut candidate = chord_pending.clone();
+                            candidate.push(chord);
+                            match keymap.classify_seq(&candidate) {
+                                SeqClass::Prefix => {
+                                    chord_pending = candidate;
+                                    renderer.request_repaint();
+                                    continue;
+                                }
+                                SeqClass::Exact(a) => {
+                                    chord_pending.clear();
+                                    // Clear the footer's pending-prefix echo
+                                    // even if the resolved action doesn't paint.
+                                    renderer.request_repaint();
+                                    seq_action = Some(a);
+                                }
+                                SeqClass::NoMatch => {
+                                    if !chord_pending.is_empty() {
+                                        // Aborted: this key didn't continue the
+                                        // sequence. Drop the prefix (clearing the
+                                        // footer echo), then let the key possibly
+                                        // start a fresh one.
+                                        chord_pending.clear();
+                                        renderer.request_repaint();
+                                        if matches!(
+                                            keymap.classify_seq(&[chord]),
+                                            SeqClass::Prefix
+                                        ) {
+                                            chord_pending.push(chord);
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         // Resolve the key to a rebindable global command
-                        // (config-overridable). `None` for everything else
-                        // (typing, input-editor keys, the Ctrl+C/D/Esc
-                        // cancel gesture), which flows through unchanged.
-                        let action = keymap.resolve(&key);
-                        let is_ctrl_c = key.code == KeyCode::Char('c')
+                        // (config-overridable), or use the action a completed
+                        // chord sequence produced. `None` for everything else
+                        // (typing, input-editor keys, the Ctrl+C/D/Esc cancel
+                        // gesture), which flows through unchanged.
+                        let action = seq_action.or_else(|| keymap.resolve(&key));
+                        // A completed chord sequence consumes its terminal key:
+                        // it must not be read as a panic gesture (a `… ctrl-c`
+                        // sequence) nor leak into the editor below (a `… ctrl-y`
+                        // sequence would yank). The bound action still dispatches
+                        // through the normal `action` path.
+                        let from_sequence = seq_action.is_some();
+                        let is_ctrl_c = !from_sequence
+                            && key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL);
-                        let is_ctrl_d = key.code == KeyCode::Char('d')
+                        let is_ctrl_d = !from_sequence
+                            && key.code == KeyCode::Char('d')
                             && key.modifiers.contains(KeyModifiers::CONTROL);
                         if is_ctrl_c || is_ctrl_d {
                             if ui.rewind_picker.active {
@@ -1862,6 +1959,14 @@ pub async fn run_interactive(
                             }
                         }
 
+                        // A completed chord sequence whose global action was
+                        // conditional and didn't fire (e.g. `next_chat` with one
+                        // chat) must still be consumed — never hand its terminal
+                        // chord to the editor.
+                        if from_sequence {
+                            renderer.request_repaint();
+                            continue;
+                        }
                         // Keep the editor's wrap width in sync with the
                         // rendered box so Up/Down move by wrapped display
                         // rows (dirge-5w9v).
