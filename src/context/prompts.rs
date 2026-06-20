@@ -417,12 +417,14 @@ body
     #[test]
     fn next_prompt_starts_at_head_from_base() {
         let names = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let names: Vec<&String> = names.iter().collect();
         assert_eq!(next_prompt(None, &names), Some("a"));
     }
 
     #[test]
     fn next_prompt_advances_then_wraps() {
         let names = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let names: Vec<&String> = names.iter().collect();
         assert_eq!(next_prompt(Some("a"), &names), Some("b"));
         assert_eq!(next_prompt(Some("b"), &names), Some("c"));
         assert_eq!(next_prompt(Some("c"), &names), Some("a"));
@@ -431,6 +433,7 @@ body
     #[test]
     fn next_prompt_unknown_current_starts_at_head() {
         let names = vec!["a".to_string(), "b".to_string()];
+        let names: Vec<&String> = names.iter().collect();
         assert_eq!(next_prompt(Some("zzz"), &names), Some("a"));
     }
 
