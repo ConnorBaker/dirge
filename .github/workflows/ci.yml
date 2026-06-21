@@ -28,6 +28,13 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+  # The `validate_all_plugins_compile` Rust test (mod_tests.rs) loads every
+  # plugin against the full dirge harness surface.  It runs in the
+  # --all-features test variant below.  That's the canonical gate; there is
+  # no standalone janet -k check because the plugins reference harness/* and
+  # dap/* symbols that only exist inside the dirge Janet runtime.
+  #
+
   # dirge-9wtb: feature matrix.
   #
   # Default `cargo build` only compiles the code paths reachable
@@ -56,6 +63,8 @@ jobs:
             features: "--features acp"
           - name: plugin
             features: "--features plugin"
+          - name: dap
+            features: "--features dap,plugin"
           - name: mcp
             features: "--features mcp"
           - name: lsp
@@ -86,7 +95,7 @@ jobs:
         # CI time without commensurate coverage gain. Run tests on
         # default, plugin (covers plugin-only hook tests), and
         # all-features (worst-case interaction).
-        if: matrix.name == 'default' || matrix.name == 'plugin' || matrix.name == 'all-features'
+        if: matrix.name == 'default' || matrix.name == 'plugin' || matrix.name == 'dap' || matrix.name == 'all-features'
         run: cargo test --bin dirge ${{ matrix.features }}
 
   # Windows is only built at release time (release.yml, tag-triggered),
