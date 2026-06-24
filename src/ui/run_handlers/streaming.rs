@@ -210,8 +210,16 @@ mod tests {
 
         let s = screen(&r);
         // Partial body appears exactly once — not re-painted after the seal.
-        assert_eq!(s.matches("GAMMAWORD").count(), 1, "partial duplicated:\n{s}");
-        assert_eq!(s.matches("ALPHAWORD").count(), 1, "partial duplicated:\n{s}");
+        assert_eq!(
+            s.matches("GAMMAWORD").count(),
+            1,
+            "partial duplicated:\n{s}"
+        );
+        assert_eq!(
+            s.matches("ALPHAWORD").count(),
+            1,
+            "partial duplicated:\n{s}"
+        );
         // Echo + notice + continuation are all present.
         assert!(s.contains("please refactor"), "missing echo:\n{s}");
         assert!(s.contains("(queued)"), "missing notice:\n{s}");

@@ -46,10 +46,7 @@ pub(crate) enum CompactionThen {
     ///     `prompt` against the compacted history (the trailing user message is
     ///     dropped + not re-recorded).
     /// If compaction made no progress, the user is told to recover manually.
-    RetryAfterOverflow {
-        prompt: String,
-        made_progress: bool,
-    },
+    RetryAfterOverflow { prompt: String, made_progress: bool },
 }
 
 /// What the `compaction_phase` arm does after a reactive-overflow compaction
@@ -87,10 +84,7 @@ mod recovery_tests {
     fn made_progress_resumes_as_continuation() {
         // dirge-b899: the failed turn ran tools / streamed text — resume the
         // task, do NOT strand it (the old code refused when tools had run).
-        assert_eq!(
-            overflow_recovery(true, true),
-            OverflowRecovery::Continue
-        );
+        assert_eq!(overflow_recovery(true, true), OverflowRecovery::Continue);
     }
 
     #[test]
