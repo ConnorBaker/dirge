@@ -15,10 +15,13 @@
 
 use crate::ui::slash::CompactionRequest;
 
-/// What to do once compaction installs — the four trigger sites differ only
-/// here.
+/// What to do once compaction installs — the three off-thread trigger sites
+/// (explicit `/compress`, preemptive, reactive overflow) differ only here. The
+/// post-turn auto-compact in `done.rs` is still synchronous and does NOT route
+/// through this module (tracked as a follow-up; see dirge-21sb).
 pub(crate) enum CompactionThen {
-    /// Explicit `/compress` or post-turn auto-compact: nothing follows.
+    /// Explicit `/compress`: nothing follows. (A prompt queued while the
+    /// summarizer ran is drained into the next turn by the `Finish` arm.)
     Nothing,
     /// Preemptive (pre-prompt) compaction: after install, run a NEW streamed
     /// turn. `run_prompt` is what the runner receives (may be plugin-rewritten);

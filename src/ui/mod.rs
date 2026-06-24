@@ -3242,8 +3242,8 @@ pub async fn run_interactive(
                         renderer.set_avatar_state(avatar::AvatarState::Idle);
                     }
                     Next::Finish { clear_queue } => {
-                        ui.is_running = false;
                         if clear_queue {
+                            ui.is_running = false;
                             let dropped = ui.interjection_queue.lock().unwrap().len();
                             ui.interjection_queue.lock().unwrap().clear();
                             if dropped > 0 {
@@ -3256,6 +3256,31 @@ pub async fn run_interactive(
                                     c_error(),
                                 )?;
                             }
+                        } else if !ui.interjection_queue.lock().unwrap().is_empty() {
+                            // A non-blocking /compress stays busy while the
+                            // summarizer runs, so a prompt typed in that window
+                            // is queued as an interjection. Finish spawns no
+                            // runner, and only a runner drains the queue — so
+                            // without this the message would strand. Drain it
+                            // into the next turn, mirroring handle_done's
+                            // idle-drain (done.rs).
+                            let queued: Vec<String> =
+                                ui.interjection_queue.lock().unwrap().drain(..).collect();
+                            let combined = queued.join("\n\n");
+                            ui.last_user_prompt.clone_from(&combined);
+                            let history = crate::agent::runner::convert_history(session);
+                            session.add_message(MessageRole::User, &combined);
+                            let runner = agent.clone().spawn_runner(
+                                crate::agent::tools::background::prepend_pending_notifications(
+                                    &combined,
+                                    bg_store.as_ref(),
+                                ),
+                                history,
+                                Some(ui.interjection_queue.clone()),
+                            );
+                            runner.install_into(&mut ui.agent_rx, &mut ui.agent_abort, &mut ui.agent_interject, &mut ui.agent_cancel, &mut ui.is_running);
+                        } else {
+                            ui.is_running = false;
                         }
                         renderer.set_avatar_state(avatar::AvatarState::Idle);
                     }
