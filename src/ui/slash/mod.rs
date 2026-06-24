@@ -162,77 +162,6 @@ pub enum CompressOutcome {
     NoOp,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn handle_compress(
-    instructions: Option<&str>,
-    // `true` for an explicit user `/compact` — force the pass regardless of the
-    // current context fraction. Auto-compaction passes `false` so it stays
-    // gated by the "context within limits" check [dirge-fgtj].
-    forced: bool,
-    agent: &mut AnyAgent,
-    client: &AnyClient,
-    renderer: &mut Renderer,
-    session: &mut Session,
-    cli: &Cli,
-    cfg: &Config,
-    context: &mut ContextFiles,
-    permission: &Option<PermCheck>,
-    ask_tx: &Option<AskSender>,
-    // Audit followup (companion to C8 LSP fix): question_tx +
-    // plan_tx were previously passed as None when this function
-    // rebuilt the agent post-compact. Tools that depend on either
-    // (the `question` tool, plan-mode switch hooks) silently
-    // broke after every auto-compact + manual /compress. Thread
-    // the channels through.
-    question_tx: &Option<crate::agent::tools::question::QuestionSender>,
-    plan_tx: &Option<crate::agent::tools::plan::PlanSwitchSender>,
-    _user_tx: &tokio::sync::mpsc::UnboundedSender<crate::event::UserEvent>,
-    bg_store: &Option<crate::agent::tools::background::BackgroundStore>,
-    sandbox: &Sandbox,
-    #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
-    #[cfg(feature = "semantic")] semantic_manager: Option<&SemanticManager>,
-    #[cfg(feature = "lsp")] lsp_manager: Option<&std::sync::Arc<crate::lsp::manager::LspManager>>,
-) -> anyhow::Result<CompressOutcome> {
-    // dirge-tv3p: compose the non-blocking split synchronously. `prepare`
-    // does the cheap on-thread decision (what to summarize + the prompt),
-    // `run_compaction` is the slow LLM call, `install` rotates the session.
-    // The event loop runs these three across a spawned task so the UI stays
-    // responsive; this wrapper keeps the old synchronous contract for any
-    // remaining inline caller.
-    match prepare_compaction(instructions, forced, agent, client, renderer, session, cfg)? {
-        CompactionDecision::NoOp(outcome) => Ok(outcome),
-        CompactionDecision::Ready(req) => {
-            let req = *req;
-            let summary = crate::provider::run_compaction(req.model, req.prompt).await?;
-            install_compaction(
-                summary,
-                req.cut_idx,
-                req.tokens_before,
-                agent,
-                client,
-                renderer,
-                session,
-                cli,
-                cfg,
-                context,
-                permission,
-                ask_tx,
-                question_tx,
-                plan_tx,
-                bg_store,
-                sandbox,
-                #[cfg(feature = "mcp")]
-                mcp_manager,
-                #[cfg(feature = "semantic")]
-                semantic_manager,
-                #[cfg(feature = "lsp")]
-                lsp_manager,
-            )
-            .await
-        }
-    }
-}
-
 /// dirge-tv3p: the inputs a spawned compaction task + its install need —
 /// produced by [`prepare_compaction`] on the UI thread.
 pub(crate) struct CompactionRequest {
@@ -249,7 +178,7 @@ pub(crate) struct CompactionRequest {
 /// Outcome of the cheap on-thread compaction decision.
 pub(crate) enum CompactionDecision {
     /// Nothing to do — the reason was already rendered.
-    NoOp(CompressOutcome),
+    NoOp,
     /// Run the summarizer (off-thread) then [`install_compaction`]. Boxed —
     /// `CompactionRequest` (model + prompt) is much larger than `NoOp`.
     Ready(Box<CompactionRequest>),
@@ -281,7 +210,7 @@ pub(crate) fn prepare_compaction(
     // compress, summary-larger-than-savings) still apply to both [dirge-fgtj].
     if !forced && session.total_estimated_tokens <= max_tokens {
         renderer.write_line("context within limits, no compression needed", c_agent())?;
-        return Ok(CompactionDecision::NoOp(CompressOutcome::NoOp));
+        return Ok(CompactionDecision::NoOp);
     }
 
     let mut accumulated = 0u64;
@@ -305,7 +234,7 @@ pub(crate) fn prepare_compaction(
 
     if cut_idx == 0 {
         renderer.write_line("nothing to compress (entire context is recent)", c_agent())?;
-        return Ok(CompactionDecision::NoOp(CompressOutcome::NoOp));
+        return Ok(CompactionDecision::NoOp);
     }
 
     let messages_to_summarize = &session.messages[..cut_idx];

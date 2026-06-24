@@ -516,7 +516,7 @@ pub async fn run_interactive(
     // handlers (done / context_overflow / context_compacted) take one
     // `&AgentBuildDeps` instead of ~10 individual params.
     macro_rules! make_agent_build_deps {
-        ($ux:ident) => {
+        () => {
             run_handlers::AgentBuildDeps {
                 client: &client,
                 permission: &permission,
@@ -525,7 +525,6 @@ pub async fn run_interactive(
                 plan_tx: &plan_tx,
                 bg_store: &bg_store,
                 sandbox: &sandbox,
-                user_tx: &$ux,
                 #[cfg(feature = "mcp")]
                 mcp_manager: mcp_manager.as_ref(),
                 #[cfg(feature = "semantic")]
@@ -2255,7 +2254,7 @@ pub async fn run_interactive(
                                                 ui.is_running = true;
                                                 renderer.set_avatar_state(avatar::AvatarState::Thinking);
                                             }
-                                            Ok(crate::ui::slash::CompactionDecision::NoOp(_)) => {
+                                            Ok(crate::ui::slash::CompactionDecision::NoOp) => {
                                                 // prepare already rendered why.
                                                 if let Err(e) = crate::session::storage::save_session(session) {
                                                     renderer.write_line(&format!("warning: failed to save session: {e}"), c_error())?;
@@ -2556,10 +2555,17 @@ pub async fn run_interactive(
                                 let preemptive_threshold = max_tokens_for_check * 85 / 100;
                                 let est_new_tokens =
                                     crate::session::Session::estimate_tokens(&prompt);
-                                let preemptive_fired = session
-                                    .total_estimated_tokens
-                                    .saturating_add(est_new_tokens)
-                                    > preemptive_threshold
+                                // `compact_enabled = false` opts out of proactive
+                                // compaction (this is the only site that still
+                                // honors it now that the eager post-turn pass is
+                                // gone — dirge-21sb). Reactive overflow recovery
+                                // stays ungated: it's emergency rescue, not
+                                // proactive, matching the old eager/reactive split.
+                                let preemptive_fired = cfg.resolve_compact_enabled()
+                                    && session
+                                        .total_estimated_tokens
+                                        .saturating_add(est_new_tokens)
+                                        > preemptive_threshold
                                     && session.total_estimated_tokens > 0;
                                 // dirge-tv3p: when preemptive compaction fires,
                                 // run the summarizer OFF-thread (it was a 10-60s
@@ -2589,7 +2595,7 @@ pub async fn run_interactive(
                                             deferred_to_compaction = true;
                                             history
                                         }
-                                        Ok(crate::ui::slash::CompactionDecision::NoOp(_)) => {
+                                        Ok(crate::ui::slash::CompactionDecision::NoOp) => {
                                             crate::agent::runner::convert_history(session)
                                         }
                                         Err(e) => {
@@ -2795,7 +2801,7 @@ pub async fn run_interactive(
                             &mut ui.is_running,
                             &mut agent,
                             context,
-                            &make_agent_build_deps!(user_tx),
+                            &make_agent_build_deps!(),
                             &mut ui.agent_rx,
                             &mut ui.agent_abort,
                             &mut ui.agent_interject,
@@ -2881,7 +2887,7 @@ pub async fn run_interactive(
                             &mut ui.is_running,
                             &mut agent,
                             context,
-                            &make_agent_build_deps!(user_tx),
+                            &make_agent_build_deps!(),
                             &mut ui.agent_rx,
                             &mut ui.agent_abort,
                             &mut ui.agent_interject,
@@ -2969,7 +2975,7 @@ pub async fn run_interactive(
                         let mut ctx = make_run_ctx!();
                         run_handlers::handle_context_compacted(
                             &mut ctx,
-                            &make_agent_build_deps!(user_tx),
+                            &make_agent_build_deps!(),
                             &mut agent,
                             context,
                             new_session_id,

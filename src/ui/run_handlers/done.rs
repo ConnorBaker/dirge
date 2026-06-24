@@ -3,8 +3,7 @@
 //! This is the largest handler — it closes a successful turn,
 //! finalizes the streamed response, runs the plugin `on-response` /
 //! `on-complete` / `prepare-next-run` chain (with optional model
-//! swap), auto-compacts when the session crossed the threshold,
-//! decides via `decide_post_done_action` whether to launch a
+//! swap), decides via `decide_post_done_action` whether to launch a
 //! follow-up / loop iteration / stop, hands off to `plan_review` when a
 //! phased `/plan` implement turn just finished (the reviewer-runs-code
 //! loop), spawns a background review + curator pass when idle, handles
@@ -30,7 +29,6 @@ use crate::ui::agent_io::persist_turn_to_db;
 use crate::ui::avatar;
 use crate::ui::colors::{c_agent, c_error};
 use crate::ui::run_handlers::{AgentBuildDeps, RunCtx};
-use crate::ui::slash::handle_compress;
 use crate::ui::theme;
 use crate::ui::tool_display::{chamber_bottom, chamber_widths};
 
@@ -83,7 +81,6 @@ pub(crate) async fn handle_done(
     let ask_tx = deps.ask_tx;
     let question_tx = deps.question_tx;
     let plan_tx = deps.plan_tx;
-    let user_tx = deps.user_tx;
     let bg_store = deps.bg_store;
     let sandbox = deps.sandbox;
     #[cfg(feature = "mcp")]
@@ -337,93 +334,14 @@ pub(crate) async fn handle_done(
     ctx.end_reasoning();
     *ctx.reasoning_start_line = None;
 
-    #[cfg(feature = "loop")]
-    let loop_running = loop_bits.state.as_ref().is_some_and(|ls| ls.active);
-    #[cfg(not(feature = "loop"))]
-    let loop_running = false;
-
-    if !loop_running
-        && ctx.cfg.resolve_compact_enabled()
-        && ctx
-            .session
-            .needs_compaction(ctx.cfg.resolve_reserve_tokens())
-        && !ctx.cli.no_session
-    {
-        // Auto-compact failure used to render as a
-        // single dim red line that scrolled past
-        // unnoticed — users kept typing into an
-        // over-full context and saw mysterious
-        // context-length errors next turn. Frame
-        // the warning so it visibly stops the eye
-        // and tells the user what to do next.
-        ctx.renderer
-            .write_line("▒░ auto-compacting context ░▒", theme::accent())?;
-        let compress_result = handle_compress(
-            None,
-            false, // forced: auto-compaction stays threshold-gated [dirge-fgtj]
-            agent,
-            client,
-            ctx.renderer,
-            ctx.session,
-            ctx.cli,
-            ctx.cfg,
-            context,
-            permission,
-            ask_tx,
-            question_tx,
-            plan_tx,
-            user_tx,
-            bg_store,
-            sandbox,
-            #[cfg(feature = "mcp")]
-            mcp_manager,
-            #[cfg(feature = "semantic")]
-            semantic_manager,
-            #[cfg(feature = "lsp")]
-            lsp_manager,
-        )
-        .await;
-        if let Err(e) = compress_result {
-            ctx.renderer.write_line(
-                "╭─ ⚠ AUTO-COMPACT FAILED ─────────────────────────────╮",
-                c_error(),
-            )?;
-            // Cap the cause length so a sprawling
-            // multi-line error doesn't blow out the
-            // box's visual rhythm. The full error
-            // is still in the agent's recovery
-            // path; this is for the user-facing
-            // hint only.
-            let cause = {
-                let s = e.to_string().replace('\n', " ");
-                if s.chars().count() > 64 {
-                    let mut out: String = s.chars().take(63).collect();
-                    out.push('…');
-                    out
-                } else {
-                    s
-                }
-            };
-            ctx.renderer
-                .write_line(&format!("│ cause: {}", cause), c_error())?;
-            ctx.renderer.write_line(
-                "│ context is over the threshold — replies may start",
-                c_error(),
-            )?;
-            ctx.renderer
-                .write_line("│ hitting context-length errors. Try /compress", c_error())?;
-            ctx.renderer.write_line(
-                "│ manually, /clear to start fresh, or restart with",
-                c_error(),
-            )?;
-            ctx.renderer
-                .write_line("│ a larger context_window in config.", c_error())?;
-            ctx.renderer.write_line(
-                "╰─────────────────────────────────────────────────────╯",
-                c_error(),
-            )?;
-        }
-    }
+    // No eager post-turn auto-compaction here (dirge-21sb). Running the
+    // summarizer inline froze the UI for the 10-60s it took, and this is the
+    // most common trigger. The two non-blocking paths now cover it: the next
+    // user prompt compacts preemptively off-thread (the original motivation —
+    // stop users typing into an over-full context), and any follow-up turn
+    // (loop / reviewer / plugin / drained interjection) that still overflows
+    // recovers reactively via handle_context_overflow, also off-thread. Both
+    // keep the loop responsive and Ctrl+C-able.
 
     if !ctx.cli.no_session
         && let Err(e) = crate::session::storage::save_session(ctx.session)

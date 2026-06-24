@@ -120,7 +120,7 @@ pub(crate) async fn handle_context_overflow(
             ));
             // Stay busy while compaction runs; the arm releases / retries.
         }
-        Ok(crate::ui::slash::CompactionDecision::NoOp(_)) => {
+        Ok(crate::ui::slash::CompactionDecision::NoOp) => {
             // Compaction decided there's nothing to shrink — retrying would just
             // overflow again. Surface it and drop queued messages (safety).
             ctx.renderer.write_line(
