@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-06-26
+
 ### Fixed
 - **Headless `--print`/`--loop` no longer hangs forever on a tool that needs
   permission confirmation.** These modes have no UI loop to service the
