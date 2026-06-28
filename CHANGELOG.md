@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.13.8] - 2026-06-28
+
+### Added
+- **Steerable critic preamble.** The in-loop critic's system preamble was
+  hardcoded; it's now exposable at two tiers — a global `critic_preamble` in
+  config (`resolve_critic_preamble()`) and a per-prompt frontmatter
+  `critic_preamble:` (inline or a YAML block scalar; empty inherits). A
+  `critic: false` frontmatter suppresses the critic for that prompt only. See
+  [docs/prompts.md](docs/prompts.md). (e0f684a)
+
+### Changed
+- **Goal gate decoupled from the critic.** They previously shared one judge
+  closure (and preamble), so a critic override or `critic: false` leaked into
+  goal judgements. `build_critic_fn` is generalized to a `build_judge_fn` that
+  bakes an independent preamble; the critic and the `--goal` gate now share a
+  client but judge under separate preambles, and the gate always uses its own
+  fixed `GOAL_PREAMBLE`. `CRITIC_FORMAT` and `GOAL_PREAMBLE` remain
+  non-overridable by design. (e0f684a)
+
 ## [0.13.7] - 2026-06-27
 
 ### Fixed
