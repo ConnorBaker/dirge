@@ -1986,6 +1986,43 @@ fn test_register_renderer_records_pairs() {
     assert!(renderers.contains(&("telemetry".to_string(), "render-stat".to_string())));
 }
 
+/// A `type` containing `|` must round-trip unchanged (it's the old
+/// field separator) and duplicate registrations resolve last-wins.
+#[cfg(feature = "plugin")]
+#[test]
+fn list_renderers_round_trips_pipe_in_type_and_dedups_last_wins() {
+    let mut mgr = PluginManager::try_new().unwrap();
+    mgr.eval(r#"(harness/register-renderer "book|mark" "fn-a")"#)
+        .unwrap();
+    mgr.eval(r#"(harness/register-renderer "book|mark" "fn-b")"#)
+        .unwrap();
+    let r = mgr.list_renderers();
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0], ("book|mark".to_string(), "fn-b".to_string()));
+}
+
+/// `set_deny_tools_for_computer_use` builds a Janet list literal from the
+/// deny names. A name containing `"` or `\` must be escaped (not
+/// raw-interpolated) or the eval errors and the deny set is silently lost.
+/// This round-trips the names back out of the Janet deny-tools table.
+#[cfg(all(feature = "plugin", feature = "experimental-ui-computer-use"))]
+#[test]
+fn set_deny_tools_round_trips_quote_and_backslash_names() {
+    let mut mgr = PluginManager::try_new().unwrap();
+    let deny = vec![
+        "he\"llo".to_string(), // contains a double-quote
+        "ba\\ck".to_string(),  // contains a backslash
+        "plain".to_string(),
+    ];
+    mgr.set_deny_tools_for_computer_use(&deny);
+    let joined = mgr
+        .eval(r#"(string/join (sorted (keys harness/computer-use-deny-tools)) "\n")"#)
+        .unwrap();
+    let mut got: Vec<&str> = joined.lines().collect();
+    got.sort();
+    assert_eq!(got, vec!["ba\\ck", "he\"llo", "plain"]);
+}
+
 #[cfg(feature = "plugin")]
 #[test]
 fn test_invoke_renderer_collects_render_lines() {
