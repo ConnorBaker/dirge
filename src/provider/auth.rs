@@ -8,6 +8,14 @@ use crate::config::ProviderAuth;
 pub struct ProviderAuthHeaders {
     pub bearer_token: String,
     pub chatgpt_account_id: Option<String>,
+    /// dirge-8gdv.4: true only when `bearer_token` is Dirge's own refreshable
+    /// OpenAI OAuth access token (the ChatGPT path's middle branch). Env
+    /// (`CODEX_ACCESS_TOKEN`) and legacy `codex login` file tokens set this
+    /// false — Dirge can't refresh them (dirge-30nl). The Codex transport
+    /// keys the refresh seam off this flag rather than comparing the bearer
+    /// against a second, independently-loaded credential, which a token
+    /// rotation between the two loads would break.
+    pub chatgpt_bearer_is_dirge_oauth: bool,
 }
 
 // Hand-written so the live ChatGPT bearer token can never land in a log or
@@ -24,6 +32,10 @@ impl std::fmt::Debug for ProviderAuthHeaders {
                 },
             )
             .field("chatgpt_account_id", &self.chatgpt_account_id)
+            .field(
+                "chatgpt_bearer_is_dirge_oauth",
+                &self.chatgpt_bearer_is_dirge_oauth,
+            )
             .finish()
     }
 }
@@ -69,6 +81,8 @@ fn resolve_chatgpt_auth_from_with_dirge_oauth(
         return Ok(ProviderAuthHeaders {
             bearer_token: token.trim().to_string(),
             chatgpt_account_id: normalize_optional_string(chatgpt_account_id),
+            // CODEX_ACCESS_TOKEN env override — not Dirge-refreshable.
+            chatgpt_bearer_is_dirge_oauth: false,
         });
     }
 
@@ -86,6 +100,8 @@ fn resolve_chatgpt_auth_from_with_dirge_oauth(
             return Ok(ProviderAuthHeaders {
                 bearer_token: credential.access_token().to_string(),
                 chatgpt_account_id: credential.account_id().map(str::to_string),
+                // Dirge's own OAuth token — refreshable mid-session.
+                chatgpt_bearer_is_dirge_oauth: true,
             });
         }
         Ok(None) => {}
@@ -132,6 +148,8 @@ fn resolve_chatgpt_auth_from_with_dirge_oauth(
     Ok(ProviderAuthHeaders {
         bearer_token,
         chatgpt_account_id,
+        // Legacy `codex login` file token — not Dirge-refreshable.
+        chatgpt_bearer_is_dirge_oauth: false,
     })
 }
 
@@ -174,6 +192,8 @@ fn resolve_anthropic_auth_from(
     Ok(ProviderAuthHeaders {
         bearer_token: resolved.bearer_token,
         chatgpt_account_id: None,
+        // Anthropic path — the ChatGPT/Codex flag does not apply.
+        chatgpt_bearer_is_dirge_oauth: false,
     })
 }
 
@@ -365,6 +385,7 @@ mod tests {
         let headers = ProviderAuthHeaders {
             bearer_token: "super-secret-token".to_string(),
             chatgpt_account_id: Some("acct-1".to_string()),
+            chatgpt_bearer_is_dirge_oauth: true,
         };
         let rendered = format!("{headers:?}");
         assert!(
@@ -385,6 +406,8 @@ mod tests {
 
         assert_eq!(headers.bearer_token, "env-token");
         assert_eq!(headers.chatgpt_account_id.as_deref(), Some("acct-env"));
+        // Env override is not Dirge-refreshable (dirge-8gdv.4).
+        assert!(!headers.chatgpt_bearer_is_dirge_oauth);
     }
 
     #[test]
@@ -411,6 +434,8 @@ mod tests {
 
         assert_eq!(headers.bearer_token, "fresh-dirge-token");
         assert_eq!(headers.chatgpt_account_id.as_deref(), Some("acct-dirge"));
+        // Dirge OAuth token is refreshable (dirge-8gdv.4).
+        assert!(headers.chatgpt_bearer_is_dirge_oauth);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -440,6 +465,8 @@ mod tests {
 
         assert_eq!(headers.bearer_token, "codex-token");
         assert_eq!(headers.chatgpt_account_id.as_deref(), Some("acct-codex"));
+        // Legacy codex-file fallback is not Dirge-refreshable (dirge-8gdv.4).
+        assert!(!headers.chatgpt_bearer_is_dirge_oauth);
 
         std::fs::remove_dir_all(&dir).ok();
     }

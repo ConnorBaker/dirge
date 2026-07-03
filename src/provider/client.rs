@@ -288,9 +288,15 @@ where
             Ok(AnyClient::OpenAICodex(b.build()?))
         }
         ProviderKind::OpenAI if is_chatgpt_auth => {
+            // `key` is the ChatGPT bearer from `auth_headers` (the
+            // ChatGptAuth credential branch above), so the same headers
+            // carry its provenance (dirge-8gdv.4).
+            let bearer_is_dirge_oauth = auth_headers
+                .as_ref()
+                .is_some_and(|h| h.chatgpt_bearer_is_dirge_oauth);
             let mut b = openai::Client::builder()
                 .api_key(&key)
-                .http_client(codex_http_client_for(&key));
+                .http_client(codex_http_client_for(&key, bearer_is_dirge_oauth));
             if let Some(base_url) = &base_url {
                 b = b.base_url(base_url);
             }
@@ -504,27 +510,49 @@ pub(crate) fn load_fresh_openai_oauth() -> anyhow::Result<Option<OpenAiOAuthCred
     })
 }
 
-/// True when the ChatGPT/Codex refresh seam should be attached: only when the
-/// outgoing bearer is Dirge's own OAuth access token, the sole ChatGPT-path
-/// credential Dirge can refresh. Env (`CODEX_ACCESS_TOKEN`) and legacy
-/// `codex login` file tokens carry a different bearer, so this returns false
-/// and they keep the pre-fix frozen-header behavior (dirge-30nl).
-fn codex_refresh_applies(loaded: &Option<OpenAiOAuthCredential>, bearer: &str) -> bool {
-    loaded
-        .as_ref()
-        .is_some_and(|credential| credential.access_token() == bearer)
+/// Build the Codex transport for the ChatGPT/Codex OAuth path.
+///
+/// `is_dirge_oauth` is the provenance of `bearer`, resolved once upstream in
+/// `resolve_chatgpt_auth` (dirge-8gdv.4): true only when the bearer is Dirge's
+/// own refreshable OAuth token, false for `CODEX_ACCESS_TOKEN` env and legacy
+/// `codex login` file tokens (which Dirge cannot refresh — dirge-30nl).
+///
+/// The refresh seam is keyed off that flag rather than re-comparing `bearer`
+/// against a freshly loaded credential. The old comparison had a TOCTOU: if
+/// the stored token rotated between header resolution and here, the second
+/// load returned a different token, the comparison failed, and the session
+/// froze the now-stale `bearer` — 401s all session with a fresh token on disk.
+fn codex_http_client_for(bearer: &str, is_dirge_oauth: bool) -> CodexHttpClient {
+    codex_http_client_from(
+        bearer,
+        is_dirge_oauth,
+        load_fresh_openai_oauth().ok().flatten(),
+    )
 }
 
-/// Build the Codex transport for the ChatGPT/Codex OAuth path, attaching a
-/// mid-session refresh seam when the bearer is Dirge's refreshable OAuth token
-/// (dirge-30nl). Otherwise returns a plain client whose bearer stays as rig set
-/// it from the static api_key.
-fn codex_http_client_for(bearer: &str) -> CodexHttpClient {
-    let loaded = load_fresh_openai_oauth().ok().flatten();
-    if !codex_refresh_applies(&loaded, bearer) {
+/// Testable core of [`codex_http_client_for`] — the `loaded` credential is
+/// injected so the rotation and absent-credential cases can be exercised
+/// without touching the on-disk store.
+fn codex_http_client_from(
+    bearer: &str,
+    is_dirge_oauth: bool,
+    loaded: Option<OpenAiOAuthCredential>,
+) -> CodexHttpClient {
+    if !is_dirge_oauth {
         return CodexHttpClient::default();
     }
-    let credential = loaded.expect("codex_refresh_applies guarantees Some");
+    // Prefer the freshly loaded credential's token over the passed `bearer`:
+    // if a rotation happened between resolution and now, `loaded` holds the
+    // current token while `bearer` is stale. Fall back to `bearer` only when
+    // the credential is momentarily unavailable, so the seam still refreshes
+    // on the next expiry rather than degrading to a frozen default.
+    let (seed_token, expires_at) = match loaded {
+        Some(credential) => (
+            credential.access_token().to_string(),
+            Some(credential.expires_at_epoch_ms()),
+        ),
+        None => (bearer.to_string(), None),
+    };
     let refresher: super::codex_http::CodexRefreshFn = std::sync::Arc::new(|| {
         let credential = load_fresh_openai_oauth()?.ok_or_else(|| {
             anyhow::anyhow!("stored OpenAI OAuth credential is no longer available")
@@ -534,11 +562,7 @@ fn codex_http_client_for(bearer: &str) -> CodexHttpClient {
             expires_at_ms: Some(credential.expires_at_epoch_ms()),
         })
     });
-    CodexHttpClient::new_refreshable(
-        credential.access_token().to_string(),
-        Some(credential.expires_at_epoch_ms()),
-        refresher,
-    )
+    CodexHttpClient::new_refreshable(seed_token, expires_at, refresher)
 }
 
 /// Load a fresh OpenAI OAuth credential, refreshing under a cross-process lock.
@@ -689,6 +713,7 @@ mod tests {
         ProviderAuthHeaders {
             bearer_token: "test-token".to_string(),
             chatgpt_account_id: Some("acct-test".to_string()),
+            chatgpt_bearer_is_dirge_oauth: false,
         }
     }
 
@@ -696,6 +721,7 @@ mod tests {
         ProviderAuthHeaders {
             bearer_token: "sk-ant-oat-test".to_string(),
             chatgpt_account_id: None,
+            chatgpt_bearer_is_dirge_oauth: false,
         }
     }
 
@@ -1078,18 +1104,36 @@ mod tests {
     }
 
     #[test]
-    fn codex_refresh_applies_only_to_the_dirge_oauth_bearer() {
+    fn codex_transport_keys_refresh_off_provenance_not_token_equality() {
+        // Env / legacy-file bearer (is_dirge_oauth = false) stays frozen even
+        // when a Dirge OAuth credential happens to be present -> no override.
         let credential = oauth("DIRGE-OAUTH-ACCESS");
-        // The outgoing bearer is Dirge's OAuth token -> refreshable.
-        assert!(codex_refresh_applies(
-            &Some(credential.clone()),
-            "DIRGE-OAUTH-ACCESS"
-        ));
-        // An env / legacy-file token differs from the stored OAuth access
-        // token -> stays frozen, no accidental override.
-        assert!(!codex_refresh_applies(&Some(credential), "CODEX-ENV-TOKEN"));
-        // No stored OAuth credential at all -> frozen.
-        assert!(!codex_refresh_applies(&None, "ANY"));
+        assert!(
+            !codex_http_client_from("CODEX-ENV-TOKEN", false, Some(credential.clone()))
+                .is_refreshable()
+        );
+
+        // Dirge OAuth bearer that still matches the loaded credential ->
+        // refresh seam attached.
+        assert!(
+            codex_http_client_from("DIRGE-OAUTH-ACCESS", true, Some(credential.clone()))
+                .is_refreshable()
+        );
+
+        // dirge-8gdv.4: the token rotated between resolution and here, so the
+        // passed bearer no longer equals the loaded credential. The old
+        // equality check would freeze the stale bearer; provenance keying
+        // still attaches the seam (seeded from the fresh credential).
+        let rotated = oauth("ROTATED-FRESH-ACCESS");
+        assert!(
+            codex_http_client_from("DIRGE-OAUTH-ACCESS-STALE", true, Some(rotated))
+                .is_refreshable()
+        );
+
+        // Provenance says Dirge OAuth but the credential is momentarily gone:
+        // still attach the seam (seeded from the passed bearer) so a later
+        // expiry can refresh, rather than degrading to a frozen default.
+        assert!(codex_http_client_from("DIRGE-OAUTH-ACCESS", true, None).is_refreshable());
     }
 
     #[test]
@@ -1371,6 +1415,7 @@ mod tests {
             ProviderAuthHeaders {
                 bearer_token: "test-token".to_string(),
                 chatgpt_account_id: None,
+                chatgpt_bearer_is_dirge_oauth: false,
             },
         );
         let err = match result {

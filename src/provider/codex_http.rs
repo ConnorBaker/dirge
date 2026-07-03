@@ -97,6 +97,14 @@ impl CodexHttpClient {
         }
     }
 
+    /// True when this client rewrites the Authorization header from a
+    /// refreshable token (the OAuth path); false for the default pass-through
+    /// client. Used to assert the Codex refresh seam wiring (dirge-8gdv.4).
+    #[cfg(test)]
+    pub(crate) fn is_refreshable(&self) -> bool {
+        self.token.is_some()
+    }
+
     // Rig 0.37's OpenAI Responses adapter moves `preamble` into the
     // first `input` system message, then serializes `instructions: null`.
     // The ChatGPT Codex backend wants the opposite shape: a non-empty
