@@ -2247,13 +2247,12 @@ pub async fn run_interactive(
                                         continue;
                                     }
 
-                                // Snap the chat back to the newest content the instant
-                                // the user starts interacting with the input — typing a
-                                // character or pressing Down — so they don't have to
-                                // hand-scroll all the way down from deep in the history.
-                                // (Picker / plugin-shortcut / scroll keys were already
-                                // handled-and-`continue`d above, so anything here is
-                                // headed for the input editor.)
+                                // Pressing Down while scrolled up jumps back to the
+                                // newest content (and consumes the key). Typing does
+                                // NOT snap — you can read back through the history
+                                // while composing. (Picker / plugin-shortcut / scroll
+                                // keys were already handled-and-`continue`d above, so
+                                // anything here is headed for the input editor.)
                                 if renderer.is_scrolled_up() {
                                     match scroll_snap_for(&key) {
                                         Some(ScrollSnap::Jump) => {
@@ -2263,11 +2262,6 @@ pub async fn run_interactive(
                                             renderer.scroll_to_bottom()?;
                                             renderer.request_repaint();
                                             continue;
-                                        }
-                                        Some(ScrollSnap::TypeThrough) => {
-                                            // Snap to the bottom, then fall through so
-                                            // the editor still inserts the character.
-                                            renderer.scroll_to_bottom()?;
                                         }
                                         None => {}
                                     }
@@ -4946,15 +4940,14 @@ enum ScrollSnap {
     /// Down was pressed — snap to the bottom and CONSUME the key (the jump is
     /// the whole action; don't also move the input cursor).
     Jump,
-    /// A character was typed — snap to the bottom but still let the editor
-    /// insert the character.
-    TypeThrough,
 }
 
-/// Decide the scroll-snap behavior for a key headed to the input editor. Plain
-/// typing and a plain Down snap back to the newest content; modified combos
-/// (Ctrl/Alt/Super — those are commands) and every other key leave the scroll
-/// where it is. Pure so the modifier rules are unit-testable.
+/// Decide the scroll-snap behavior for a key headed to the input editor. A plain
+/// Down jumps to the newest content; TYPING deliberately does NOT — you can read
+/// back through the history while composing, and press Down to return to the end
+/// (dirge-5w9v follow-up). Modified combos (Ctrl/Alt/Super — those are commands)
+/// and every other key leave the scroll where it is. Pure so the rules are
+/// unit-testable.
 fn scroll_snap_for(key: &crossterm::event::KeyEvent) -> Option<ScrollSnap> {
     let modified = key
         .modifiers
@@ -4964,7 +4957,6 @@ fn scroll_snap_for(key: &crossterm::event::KeyEvent) -> Option<ScrollSnap> {
     }
     match key.code {
         KeyCode::Down => Some(ScrollSnap::Jump),
-        KeyCode::Char(_) => Some(ScrollSnap::TypeThrough),
         _ => None,
     }
 }
