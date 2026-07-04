@@ -6,16 +6,16 @@
 }:
 
 let
-  version = "0.18.2";
+  version = "0.18.3";
   sel =
     {
       "x86_64-linux" = {
         triple = "x86_64-unknown-linux-gnu";
-        hash = "sha256-x+JfJ8h3VPgw9FIQsYUCpcOE9emO4qDJVCVTtAfXmSw=";
+        hash = "sha256-0SnLnE0Ft3O2LYuQKpVRVEFB+nFdcYzNY+ID/33bN0Q=";
       };
       "aarch64-darwin" = {
         triple = "aarch64-apple-darwin";
-        hash = "sha256-rfYA5GzUkRG/qCCduL2Yaw4saiseDB8rIVULnrvXtpI=";
+        hash = "sha256-hvoWFJRqcZz3qNrlDXhtNqe5w9P+PvMPZl4mzfE136Y=";
       };
     }
     .${stdenv.hostPlatform.system};
