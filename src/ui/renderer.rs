@@ -97,6 +97,48 @@ enum SourceBlock {
     /// reproduces it exactly; it just doesn't re-wrap (it's re-rendered by its
     /// own owner each interaction anyway).
     Raw { rows: Vec<LineEntry> },
+    /// A tool chamber that re-boxes to the current width on resize (dirge-ghpf).
+    /// Holds width-independent inputs; `render_block` calls a pure layout
+    /// function to produce the `╭─╮ … ╰─╯` cells at the current width.
+    /// `include_header` is false for the normal path (header is a separate
+    /// Raw/ChamberTop block written at ToolCall time) and true for collapsed
+    /// expand (Ctrl+O) where the chamber is appended whole.
+    ToolChamber {
+        tool_name: String,
+        banner_value: String,
+        output: String,
+        max_chars: usize,
+        max_lines: usize,
+        include_header: bool,
+    },
+    /// A tool-chamber TOP border `╭─ TOOL · banner ─╮`, re-fitted to the
+    /// current width on resize (dirge-ghpf). Written at ToolCall time before
+    /// the body exists, so it's its own block; storing the label + banner
+    /// (not the fitted string) lets `render_block` re-run `fit_banner_header`
+    /// at the current width, keeping the top border in lockstep with the
+    /// re-boxed body below it.
+    ChamberTop {
+        name_upper: String,
+        banner_value: String,
+        color: Color,
+    },
+    /// A single tool-chamber body row `│ content … │`, re-padded to the
+    /// current inner width on resize (dirge-ghpf). `bg` is an optional
+    /// 256-color background index (diff add/remove highlight). Used by the
+    /// special-case bodies (LSP tails, colored diff rows, summaries) that
+    /// don't go through the generic `ToolChamber` layout.
+    ChamberRow {
+        content: String,
+        color: Color,
+        bg: Option<u8>,
+        /// Center the content within the row instead of left-aligning it
+        /// (the denied/aborted notice). Mutually exclusive with `bg`.
+        centered: bool,
+    },
+    /// A tool-chamber BOTTOM border `╰──╯`, re-fitted to the current width on
+    /// resize (dirge-ghpf). Its own block because it's written from several
+    /// close paths (done, deny, body-hidden) independent of the body.
+    ChamberBottom { color: Color },
 }
 
 /// A source block plus its cached rendered-row count at the width the `buffer`
@@ -1800,6 +1842,77 @@ impl Renderer {
                 styled
             }
             SourceBlock::Raw { rows } => rows.clone(),
+            SourceBlock::ToolChamber {
+                tool_name,
+                banner_value,
+                output,
+                max_chars,
+                max_lines,
+                include_header,
+            } => {
+                let frame_w =
+                    crate::ui::tool_display::chamber_widths_for_width(self.chat_band_width()).0;
+                crate::ui::tool_display::layout_tool_chamber(
+                    tool_name,
+                    banner_value,
+                    output,
+                    *max_chars,
+                    *max_lines,
+                    *include_header,
+                    frame_w,
+                )
+                .into_iter()
+                .map(|(text, color)| LineEntry {
+                    text: CompactString::from(text),
+                    color,
+                })
+                .collect()
+            }
+            SourceBlock::ChamberTop {
+                name_upper,
+                banner_value,
+                color,
+            } => {
+                let frame_w =
+                    crate::ui::tool_display::chamber_widths_for_width(self.chat_band_width()).0;
+                vec![LineEntry {
+                    text: CompactString::from(crate::ui::tool_display::fit_banner_header(
+                        name_upper,
+                        banner_value,
+                        frame_w,
+                    )),
+                    color: *color,
+                }]
+            }
+            SourceBlock::ChamberRow {
+                content,
+                color,
+                bg,
+                centered,
+            } => {
+                let inner =
+                    crate::ui::tool_display::chamber_widths_for_width(self.chat_band_width()).1;
+                let text = if *centered {
+                    crate::ui::tool_display::chamber_row_centered(content, inner)
+                } else {
+                    match bg {
+                        Some(b) => crate::ui::tool_display::chamber_row_with_bg(content, inner, *b),
+                        None => crate::ui::tool_display::chamber_row(content, inner),
+                    }
+                };
+                vec![LineEntry {
+                    text: CompactString::from(text),
+                    color: *color,
+                }]
+            }
+            SourceBlock::ChamberBottom { color } => {
+                let frame_w =
+                    crate::ui::tool_display::chamber_widths_for_width(self.chat_band_width()).0;
+                vec![LineEntry {
+                    text: CompactString::from(crate::ui::tool_display::chamber_bottom(frame_w)),
+                    color: *color,
+                }]
+            }
         }
     }
 
@@ -1815,6 +1928,155 @@ impl Renderer {
         }
         self.source.push(Block { src: block, rows });
         self.enforce_cap();
+    }
+
+    /// Append a tool chamber as a single structured `ToolChamber` source
+    /// block. `rows` are the pre-rendered chamber lines at the current width;
+    /// they're pushed to the buffer immediately (so the UI updates now) while
+    /// the structured inputs are stored in `source` for later re-rendering on
+    /// resize.
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_tool_chamber(
+        &mut self,
+        tool_name: String,
+        banner_value: String,
+        output: String,
+        max_chars: usize,
+        max_lines: usize,
+        include_header: bool,
+        rows: Vec<(String, Color)>,
+    ) -> io::Result<()> {
+        self.commit_partial();
+        self.commit_stream();
+        let block = SourceBlock::ToolChamber {
+            tool_name,
+            banner_value,
+            output,
+            max_chars,
+            max_lines,
+            include_header,
+        };
+        let len = rows.len();
+        for (text, color) in &rows {
+            self.push_buffer_line(LineEntry {
+                text: CompactString::from(text.as_str()),
+                color: *color,
+            });
+        }
+        self.source.push(Block {
+            src: block,
+            rows: len,
+        });
+        self.enforce_cap();
+        Ok(())
+    }
+
+    /// Append a tool-chamber TOP border as a reflowing `ChamberTop` block
+    /// (dirge-ghpf). Renders the fitted banner at the current width now and
+    /// stores the label + banner so a resize re-fits it in lockstep with the
+    /// re-boxed body. Replaces `write_line_raw(&fit_banner_header(…))`.
+    pub fn write_chamber_top(
+        &mut self,
+        name_upper: String,
+        banner_value: String,
+        color: Color,
+    ) -> io::Result<()> {
+        self.commit_partial();
+        self.commit_stream();
+        let frame_w = crate::ui::tool_display::chamber_widths_for_width(self.chat_band_width()).0;
+        let text = crate::ui::tool_display::fit_banner_header(&name_upper, &banner_value, frame_w);
+        self.push_buffer_line(LineEntry {
+            text: CompactString::from(text),
+            color,
+        });
+        self.source.push(Block {
+            src: SourceBlock::ChamberTop {
+                name_upper,
+                banner_value,
+                color,
+            },
+            rows: 1,
+        });
+        self.enforce_cap();
+        Ok(())
+    }
+
+    /// Append one tool-chamber body row as a reflowing `ChamberRow` block
+    /// (dirge-ghpf). `bg` is an optional 256-color background index. Renders
+    /// at the current inner width now; a resize re-pads it. Replaces
+    /// `write_line_raw(&chamber_row(…))` / `chamber_row_with_bg`.
+    pub fn write_chamber_row(
+        &mut self,
+        content: String,
+        color: Color,
+        bg: Option<u8>,
+    ) -> io::Result<()> {
+        self.commit_partial();
+        self.commit_stream();
+        let inner = crate::ui::tool_display::chamber_widths_for_width(self.chat_band_width()).1;
+        let text = match bg {
+            Some(b) => crate::ui::tool_display::chamber_row_with_bg(&content, inner, b),
+            None => crate::ui::tool_display::chamber_row(&content, inner),
+        };
+        self.push_buffer_line(LineEntry {
+            text: CompactString::from(text),
+            color,
+        });
+        self.source.push(Block {
+            src: SourceBlock::ChamberRow {
+                content,
+                color,
+                bg,
+                centered: false,
+            },
+            rows: 1,
+        });
+        self.enforce_cap();
+        Ok(())
+    }
+
+    /// Like [`write_chamber_row`] but centers the content (the denied/aborted
+    /// notice). Reflows on resize (dirge-ghpf).
+    pub fn write_chamber_row_centered(&mut self, content: String, color: Color) -> io::Result<()> {
+        self.commit_partial();
+        self.commit_stream();
+        let inner = crate::ui::tool_display::chamber_widths_for_width(self.chat_band_width()).1;
+        self.push_buffer_line(LineEntry {
+            text: CompactString::from(crate::ui::tool_display::chamber_row_centered(
+                &content, inner,
+            )),
+            color,
+        });
+        self.source.push(Block {
+            src: SourceBlock::ChamberRow {
+                content,
+                color,
+                bg: None,
+                centered: true,
+            },
+            rows: 1,
+        });
+        self.enforce_cap();
+        Ok(())
+    }
+
+    /// Append a tool-chamber BOTTOM border as a reflowing `ChamberBottom`
+    /// block (dirge-ghpf). Renders at the current width now; a resize re-fits
+    /// it. Replaces `write_line_raw(&chamber_bottom(…))`.
+    pub fn write_chamber_bottom(&mut self, color: Color) -> io::Result<()> {
+        self.commit_partial();
+        self.commit_stream();
+        let frame_w = crate::ui::tool_display::chamber_widths_for_width(self.chat_band_width()).0;
+        self.push_buffer_line(LineEntry {
+            text: CompactString::from(crate::ui::tool_display::chamber_bottom(frame_w)),
+            color,
+        });
+        self.source.push(Block {
+            src: SourceBlock::ChamberBottom { color },
+            rows: 1,
+        });
+        self.enforce_cap();
+        Ok(())
     }
 
     /// dirge-qy3y: update the open in-flight streamed block (or open a new
@@ -2075,11 +2337,16 @@ impl Renderer {
     }
 
     /// dirge-qy3y: append PRE-FORMATTED rows that must NOT be re-wrapped on
-    /// resize — tool-chamber borders/rows already laid out to a fixed inner
-    /// width. Stored as a `Raw` block so `rebuild` reproduces them verbatim
-    /// (they don't re-box yet — future work — but they don't wrap-break on a
-    /// narrowing resize either). One buffer row per `\n`-split line, so the
-    /// chamber's `buffer_len()` index bookkeeping is unchanged vs `write_line`.
+    /// resize. Stored as a `Raw` block so `rebuild` reproduces the lines
+    /// verbatim (they don't re-box, but don't wrap-break on a narrowing resize
+    /// either). One buffer row per `\n`-split line, so `buffer_len()` index
+    /// bookkeeping is unchanged vs `write_line`.
+    ///
+    /// dirge-ghpf: chambers no longer use this — they now re-box via the
+    /// reflowing `write_chamber_top`/`write_chamber_row`/`write_chamber_bottom`
+    /// blocks. Kept as a general raw-append primitive (tests, future
+    /// non-reflowing content).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn write_line_raw(&mut self, text: &str, color: Color) -> io::Result<()> {
         let color = crate::ui::theme::no_color_remap(color);
         self.commit_partial();
