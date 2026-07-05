@@ -1360,7 +1360,9 @@ pub fn context_window_for_model(model: &str) -> Option<u64> {
         ("glm-4", 128_000),
         // Anthropic Claude
         ("claude-opus-4-5", 1_000_000),
+        ("claude-opus-4-6", 1_000_000),
         ("claude-opus-4-7", 1_000_000),
+        ("claude-opus-4-8", 1_000_000),
         ("claude-sonnet-4-5", 1_000_000),
         ("claude-sonnet-4-6", 1_000_000),
         ("claude-opus", 200_000),

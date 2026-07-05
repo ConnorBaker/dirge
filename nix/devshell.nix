@@ -12,6 +12,7 @@
   clang,
   libclang,
   pkg-config,
+  haskell-language-server,
 }:
 
 mkShell {
@@ -24,6 +25,9 @@ mkShell {
     cmake
     clang
     pkg-config
+    # On PATH so the built-in `haskell-language-server` LSP entry can be
+    # exercised against Haskell projects from within the dev shell.
+    haskell-language-server
   ]
   ++ lib.optionals stdenv.isLinux [ mold ];
 

@@ -59,6 +59,8 @@ const LANGUAGES: &[(&str, &str)] = &[
     ("hxx", "cpp"),
     ("hh", "cpp"),
     ("java", "java"),
+    ("hs", "haskell"),
+    ("lhs", "haskell"),
     ("rb", "ruby"),
     ("sh", "shellscript"),
     ("bash", "shellscript"),
@@ -112,6 +114,12 @@ mod tests {
         for ext in &["clj", "cljs", "cljc", "edn", "bb"] {
             assert_eq!(lang(&format!("foo.{ext}")), "clojure", "ext={ext}");
         }
+    }
+
+    #[test]
+    fn hs_and_lhs_are_haskell() {
+        assert_eq!(lang("src/Main.hs"), "haskell");
+        assert_eq!(lang("Main.lhs"), "haskell");
     }
 
     #[test]

@@ -228,6 +228,21 @@ fn dafny_root(file: &Path, stop_at: &Path) -> Option<PathBuf> {
     nearest_root(file, stop_at, &["dfyconfig.toml"], &[])
 }
 
+fn haskell_root(file: &Path, stop_at: &Path) -> Option<PathBuf> {
+    // HLS resolves a project from hie.yaml (explicit cradle), a Cabal
+    // project file, or a Stack project file. `*.cabal` itself can't be a
+    // marker here — `nearest_root` only does exact `join(marker).exists()`
+    // and can't glob — but the single-package "one .cabal at repo root"
+    // layout is covered by `nearest_root`'s `stop_at` fallback, which roots
+    // HLS at the worktree boundary.
+    nearest_root(
+        file,
+        stop_at,
+        &["hie.yaml", "cabal.project", "stack.yaml", "package.yaml"],
+        &[],
+    )
+}
+
 /// All built-in LSP server descriptors. Order is significant only for tie-
 /// breaking when an extension is claimed by more than one server — earlier
 /// entries are tried first.
@@ -293,6 +308,14 @@ pub fn builtin_servers() -> Vec<ServerInfo> {
             id: "dafny",
             extensions: owned(&["dfy"]),
             root: dafny_root,
+        },
+        // Haskell via haskell-language-server. Best-effort like the others:
+        // if `haskell-language-server-wrapper` isn't on PATH the spawn errors
+        // and the broken-server backoff takes over.
+        ServerInfo {
+            id: "haskell-language-server",
+            extensions: owned(&["hs", "lhs"]),
+            root: haskell_root,
         },
     ]
 }

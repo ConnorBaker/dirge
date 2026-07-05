@@ -9,7 +9,6 @@
 //! building, conversation compaction).
 
 use rig::client::CompletionClient;
-use rig::completion::Prompt;
 use rig::providers::{anthropic, chatgpt, gemini, ollama, openai, openrouter};
 
 use crate::agent::prompt;
@@ -393,45 +392,7 @@ impl AnyModel {
         preamble: Option<&str>,
     ) -> anyhow::Result<String> {
         let preamble = preamble.unwrap_or("Answer the user's question concisely.");
-        // PROV-3: wrap the bare one-shot prompt in the same recovery
-        // policy used for the main turn loop. Previously a single
-        // 503 from the provider killed every `/btw` and subagent
-        // (`task` tool) call with no retry. Network + rate-limit
-        // failures now get the standard 3-retry exponential backoff;
-        // auth / context-length / other still bail immediately.
-        use crate::agent::recovery::{RecoveryPolicy, run_with_retry};
-        let policy = RecoveryPolicy::default();
-        // The retry/backoff loop lives in `run_with_retry` (dirge-6cvc);
-        // the macro only exists to dispatch over `AnyModel`'s concrete
-        // per-variant model type (each `$m` has a different type).
-        macro_rules! one_shot {
-            ($m:expr) => {{
-                let m = $m.clone();
-                run_with_retry(&policy, "btw_query", || {
-                    let agent = rig::agent::AgentBuilder::new(m.clone())
-                        .preamble(preamble)
-                        .build();
-                    let prompt = prompt.clone();
-                    async move { agent.prompt(prompt).await }
-                })
-                .await
-                .map_err(anyhow::Error::from)
-            }};
-        }
-        match self {
-            AnyModel::OpenRouter(m) => one_shot!(m),
-            AnyModel::OpenAI(m) => one_shot!(m),
-            AnyModel::ChatGptOpenAI(m) => one_shot!(m),
-            AnyModel::OpenAICodex(m) => one_shot!(m),
-            AnyModel::Anthropic(m) => one_shot!(m),
-            AnyModel::AnthropicOauth(m) => one_shot!(m),
-            AnyModel::Gemini(m) => one_shot!(m),
-            AnyModel::DeepSeek(m) => one_shot!(m),
-            AnyModel::Glm(m) => one_shot!(m),
-            AnyModel::OpenCode(m) => one_shot!(m),
-            AnyModel::Ollama(m) => one_shot!(m),
-            AnyModel::Custom(m) => one_shot!(m),
-        }
+        summarize::oneshot_with_model(self.clone(), "btw_query", preamble, prompt).await
     }
 
     /// Phase 4 part 1: build a standalone `StreamFn` from this
@@ -510,6 +471,31 @@ impl AnyModel {
             AnyModel::Ollama(m) => m.model.clone(),
             AnyModel::Custom(m) => m.model.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn btw_query_with_uses_streaming_oneshot_path() {
+        let src = include_str!("dispatch.rs");
+        let start = src
+            .find("pub async fn btw_query_with")
+            .expect("btw_query_with must exist");
+        let end = src[start..]
+            .find("\n    /// Phase 4 part 1")
+            .map(|offset| start + offset)
+            .expect("btw_query_with section must end before build_stream_fn docs");
+        let body = &src[start..end];
+
+        assert!(
+            body.contains("summarize::oneshot_with_model"),
+            "btw_query_with must use the streaming one-shot path; Codex subagents reject non-streaming prompt calls"
+        );
+        assert!(
+            !body.contains("agent.prompt"),
+            "btw_query_with must not use non-streaming agent.prompt for subagents"
+        );
     }
 }
 

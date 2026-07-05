@@ -174,6 +174,18 @@ impl ProcessSpawner {
                 init_options: Value::Null,
             },
         );
+        m.insert(
+            "haskell-language-server".to_string(),
+            ProcessCommand {
+                // The `-wrapper` entry point selects the HLS build matching the
+                // project's GHC. Users with a single pinned HLS can override to
+                // `haskell-language-server` via config `lsp.servers.<id>.command`.
+                program: PathBuf::from("haskell-language-server-wrapper"),
+                args: vec!["--lsp".to_string()],
+                env: vec![],
+                init_options: Value::Null,
+            },
+        );
         m
     }
 }
