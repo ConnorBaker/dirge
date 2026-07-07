@@ -4,6 +4,20 @@ All notable changes to dirge are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.12] - 2026-07-07
+
+### Fixed
+- Continuous TUI strobe on gnome-terminal / VTE 0.76 (Linux). The `FocusGained`
+  recovery re-entered the alternate screen (`?1049h`), which re-enters *and
+  clears* it — and on VTE, processing `?1049h` emits a synthetic `FocusGained`
+  as a side effect, so focus-in fed itself into a strobe (and flashed on every
+  alt-tab even after the 0.18.11 throttle bounded the loop). dirge never leaves
+  the alt screen on a focus change, so re-entry was unnecessary; the focus-in
+  recovery is now mode-only — it re-arms mouse capture, bracketed paste, and
+  focus reporting without `?1049h` or a screen clear, then repaints. The full
+  clear-and-re-enter recovery remains bound to the manual `Ctrl+L` hatch
+  (dirge-1f2a). Reported against gnome-terminal 3.52 / VTE 0.76.
+
 ## [0.18.11] - 2026-07-07
 
 ### Fixed
