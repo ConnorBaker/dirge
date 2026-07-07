@@ -167,6 +167,22 @@ async fn test_preserves_crlf_line_endings() {
     );
 }
 
+#[tokio::test]
+async fn edit_end_to_end_rejects_longer_old_text_without_panicking() {
+    let tmp = TempFile::new("longer_old_text.txt");
+    std::fs::write(tmp.path(), "one\n").unwrap();
+    let tool = EditTool::new(None, None);
+    let result = tool
+        .call(EditArgs {
+            path: tmp.path().into(),
+            old_text: "one\ntwo\n".into(),
+            new_text: "replacement".into(),
+            replace_all: None,
+        })
+        .await;
+    assert!(result.is_err());
+}
+
 #[test]
 fn test_show_diff_basic() {
     let diff = EditTool::show_diff("test.txt", "hello world\nfoo bar\nbaz\n", 12, "foo", "qux");

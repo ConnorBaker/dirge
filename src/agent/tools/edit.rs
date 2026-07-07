@@ -70,6 +70,7 @@ impl EditTool {
         let new_line_count = new_text.lines().count();
         let ctx: usize = 3;
 
+        let byte_pos = byte_pos.min(content.len());
         let match_line = content[..byte_pos].matches('\n').count();
         let start = match_line.saturating_sub(ctx);
         let ctx_after_start = (match_line + old_line_count).min(lines.len());
@@ -524,35 +525,31 @@ fn keep_disjoint_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> 
 fn find_line_trimmed_matches(content: &str, find: &str) -> Option<Vec<(usize, usize)>> {
     let content_lines: Vec<&str> = content.split('\n').collect();
     let find_lines: Vec<&str> = find.split('\n').collect();
-    if find_lines.is_empty() {
+    if find_lines.is_empty() || find_lines.len() > content_lines.len() {
         return None;
     }
-    // Line-start byte offsets for content.
     let mut line_starts = Vec::with_capacity(content_lines.len() + 1);
     line_starts.push(0usize);
     let mut acc = 0usize;
     for line in &content_lines {
-        acc += line.len() + 1; // +1 for the \n separator
+        acc += line.len() + 1;
         line_starts.push(acc);
     }
     let mut out = Vec::new();
-    for i in 0..=content_lines.len().saturating_sub(find_lines.len()) {
+    for i in 0..=content_lines.len() - find_lines.len() {
         let block = &content_lines[i..i + find_lines.len()];
-        let all_trim_match = block
+        if !block
             .iter()
             .zip(find_lines.iter())
-            .all(|(a, b)| a.trim() == b.trim());
-        if !all_trim_match {
+            .all(|(a, b)| a.trim() == b.trim())
+        {
             continue;
         }
         let start_byte = line_starts[i];
-        // End of the matched block (no trailing \n unless the
-        // block ends with one in source). Compute by walking
-        // forward: sum byte lengths + (n-1) interior newlines.
         let mut end_byte = start_byte;
         for (k, line) in block.iter().enumerate() {
             end_byte += line.len();
-            if k < block.len() - 1 {
+            if k + 1 < block.len() {
                 end_byte += 1;
             }
         }
@@ -678,6 +675,9 @@ fn find_indentation_flexible_matches(content: &str, find: &str) -> Option<Vec<(u
     let norm_find = strip_min_indent(find);
     let find_lines: Vec<&str> = find.split('\n').collect();
     let content_lines: Vec<&str> = content.split('\n').collect();
+    if find_lines.is_empty() || find_lines.len() > content_lines.len() {
+        return None;
+    }
     let mut line_starts = Vec::with_capacity(content_lines.len() + 1);
     line_starts.push(0usize);
     let mut acc = 0usize;
@@ -686,7 +686,7 @@ fn find_indentation_flexible_matches(content: &str, find: &str) -> Option<Vec<(u
         line_starts.push(acc);
     }
     let mut out = Vec::new();
-    for i in 0..=content_lines.len().saturating_sub(find_lines.len()) {
+    for i in 0..=content_lines.len() - find_lines.len() {
         let block = &content_lines[i..i + find_lines.len()];
         let block_text = block.join("\n");
         if strip_min_indent(&block_text) != norm_find {
@@ -763,6 +763,16 @@ mod fuzzy_tests {
     }
 
     #[test]
+    fn line_trimmed_matches_single_line_at_end() {
+        let content = "before\nafter\n";
+        let find = "after";
+        let m = find_line_trimmed_matches(content, find).unwrap();
+        assert_eq!(m.len(), 1);
+        let (s, e) = m[0];
+        assert_eq!(&content[s..e], "after");
+    }
+
+    #[test]
     fn line_trimmed_no_match_when_content_differs() {
         let content = "let x = 1;\nlet y = 2;\n";
         let find = "let x = 1;\nlet z = 3;";
@@ -777,6 +787,23 @@ mod fuzzy_tests {
         let m = find_whitespace_normalized_matches(content, find).unwrap();
         // Block spans the 3 lines fn... { ... } when joined.
         assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn indentation_flexible_matches_single_line_at_end() {
+        let content = "before\nafter\n";
+        let find = "after";
+        let m = find_indentation_flexible_matches(content, find).unwrap();
+        assert_eq!(m.len(), 1);
+        let (s, e) = m[0];
+        assert_eq!(&content[s..e], "after");
+    }
+
+    #[test]
+    fn indentation_flexible_rejects_longer_find_without_panicking() {
+        let content = "one\n";
+        let find = "one\ntwo\nthree";
+        assert!(find_indentation_flexible_matches(content, find).is_none());
     }
 
     #[test]
@@ -839,6 +866,13 @@ mod fuzzy_tests {
             out.replace_range(s..e, "_");
         }
         assert_eq!(out, "a__c");
+    }
+
+    #[test]
+    fn show_diff_clamps_byte_position_to_content_len() {
+        let diff = EditTool::show_diff("demo.txt", "line1\nline2", 47, "line2", "LINE2");
+        assert!(diff.contains("--- a/demo.txt"));
+        assert!(diff.contains("+LINE2"));
     }
 }
 
