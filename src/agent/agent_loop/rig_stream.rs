@@ -442,12 +442,26 @@ where
                     };
                 }
                 Ok(StreamedAssistantContent::Final(r)) => {
-                    token_usage = r.token_usage().map(|u| super::message::TokenUsage {
-                        input_tokens: u.input_tokens,
-                        output_tokens: u.output_tokens,
-                        cached_input_tokens: u.cached_input_tokens,
-                        cache_creation_input_tokens: u.cache_creation_input_tokens,
-                    });
+                    let u = r.token_usage();
+                    // rig 0.39 changed `token_usage()` from `Option<Usage>`
+                    // to `Usage`, using all-zeros as its "provider didn't
+                    // report" sentinel (the old `None`). Preserve that
+                    // distinction: an unreported turn must stay `None` so the
+                    // downstream guard in stream.rs doesn't emit a
+                    // `LoopEvent::Usage` for it and dilute the cache-hit ratio
+                    // with an empty turn.
+                    if u.input_tokens != 0
+                        || u.output_tokens != 0
+                        || u.cached_input_tokens != 0
+                        || u.cache_creation_input_tokens != 0
+                    {
+                        token_usage = Some(super::message::TokenUsage {
+                            input_tokens: u.input_tokens,
+                            output_tokens: u.output_tokens,
+                            cached_input_tokens: u.cached_input_tokens,
+                            cache_creation_input_tokens: u.cache_creation_input_tokens,
+                        });
+                    }
                 }
                 Err(err) => {
                     yield StreamEvent::Error {
@@ -529,8 +543,8 @@ mod tests {
     struct TestResponse;
 
     impl GetTokenUsage for TestResponse {
-        fn token_usage(&self) -> Option<rig::completion::Usage> {
-            None
+        fn token_usage(&self) -> rig::completion::Usage {
+            rig::completion::Usage::default()
         }
     }
 
@@ -572,9 +586,11 @@ mod tests {
         let raw = raw_stream(vec![
             Ok(StreamedAssistantContent::Text(Text {
                 text: "Hello".to_string(),
+                additional_params: None,
             })),
             Ok(StreamedAssistantContent::Text(Text {
                 text: " world".to_string(),
+                additional_params: None,
             })),
         ]);
         let events = drain(wrap_streamed_assistant(raw, None, None)).await;
@@ -1003,10 +1019,12 @@ mod tests {
         let raw = raw_stream(vec![
             Ok(StreamedAssistantContent::Text(Text {
                 text: "partial".to_string(),
+                additional_params: None,
             })),
             Err(CompletionError::ProviderError("bad upstream".to_string())),
             Ok(StreamedAssistantContent::Text(Text {
                 text: " more text".to_string(),
+                additional_params: None,
             })),
         ]);
         let events = drain(wrap_streamed_assistant(raw, None, None)).await;
@@ -1272,6 +1290,7 @@ mod tests {
             Ok(StreamedAssistantContent::Reasoning(r1)),
             Ok(StreamedAssistantContent::Text(Text {
                 text: "between".to_string(),
+                additional_params: None,
             })),
             Ok(StreamedAssistantContent::Reasoning(r2)),
         ]);
@@ -1440,6 +1459,7 @@ mod tests {
         let raw = raw_stream(vec![
             Ok(StreamedAssistantContent::Text(Text {
                 text: "hi ".to_string(),
+                additional_params: None,
             })),
             Ok(StreamedAssistantContent::ReasoningDelta {
                 id: None,
@@ -1447,6 +1467,7 @@ mod tests {
             }),
             Ok(StreamedAssistantContent::Text(Text {
                 text: "done".to_string(),
+                additional_params: None,
             })),
         ]);
         let events = drain(wrap_streamed_assistant(raw, None, None)).await;
@@ -1496,6 +1517,7 @@ mod tests {
                 Some((
                     Ok(StreamedAssistantContent::Text(Text {
                         text: "first chunk".to_string(),
+                        additional_params: None,
                     })),
                     1,
                 ))
@@ -1544,6 +1566,7 @@ mod tests {
     async fn chunk_timeout_none_disables_timeout() {
         let raw = raw_stream(vec![Ok(StreamedAssistantContent::Text(Text {
             text: "ok".to_string(),
+            additional_params: None,
         }))]);
         let events = drain(wrap_streamed_assistant(raw, None, None)).await;
         // Normal completion — no Error.
@@ -1593,6 +1616,7 @@ mod tests {
                         Some((
                             Ok(StreamedAssistantContent::Text(Text {
                                 text: "thinking…".to_string(),
+                                additional_params: None,
                             })),
                             2,
                         ))
@@ -1605,6 +1629,7 @@ mod tests {
                         Some((
                             Ok(StreamedAssistantContent::Text(Text {
                                 text: "more thinking…".to_string(),
+                                additional_params: None,
                             })),
                             3,
                         ))
@@ -1733,9 +1758,11 @@ mod tests {
         let raw = raw_stream(vec![
             Ok(StreamedAssistantContent::Text(Text {
                 text: "first".to_string(),
+                additional_params: None,
             })),
             Ok(StreamedAssistantContent::Text(Text {
                 text: " second".to_string(),
+                additional_params: None,
             })),
         ]);
         let signal = AbortSignal::new();
@@ -1772,6 +1799,7 @@ mod tests {
     async fn signal_none_does_not_affect_stream() {
         let raw = raw_stream(vec![Ok(StreamedAssistantContent::Text(Text {
             text: "ok".to_string(),
+            additional_params: None,
         }))]);
         let events = drain(wrap_streamed_assistant(raw, None, None)).await;
         // Normal completion — no Error.
@@ -1792,9 +1820,11 @@ mod tests {
         let raw = raw_stream(vec![
             Ok(StreamedAssistantContent::Text(Text {
                 text: "fast 1".to_string(),
+                additional_params: None,
             })),
             Ok(StreamedAssistantContent::Text(Text {
                 text: " 2".to_string(),
+                additional_params: None,
             })),
         ]);
         // Tight timeout (10ms) but all events fire
@@ -1822,13 +1852,13 @@ mod tests {
         #[derive(Clone, Debug)]
         struct UsageResponse;
         impl GetTokenUsage for UsageResponse {
-            fn token_usage(&self) -> Option<rig::completion::Usage> {
+            fn token_usage(&self) -> rig::completion::Usage {
                 let mut u = rig::completion::Usage::new();
                 u.input_tokens = 1000;
                 u.output_tokens = 50;
                 u.cached_input_tokens = 800;
                 u.cache_creation_input_tokens = 0;
-                Some(u)
+                u
             }
         }
 
@@ -1840,6 +1870,7 @@ mod tests {
         > = Box::pin(futures::stream::iter(vec![
             Ok(StreamedAssistantContent::Text(Text {
                 text: "hi".to_string(),
+                additional_params: None,
             })),
             Ok(StreamedAssistantContent::Final(UsageResponse)),
         ]));
@@ -1855,5 +1886,47 @@ mod tests {
         assert_eq!(usage.input_tokens, 1000);
         assert_eq!(usage.cached_input_tokens, 800);
         assert_eq!(usage.cache_creation_input_tokens, 0);
+    }
+
+    /// rig 0.39 returns an all-zeros `Usage` (not `None`) when a provider
+    /// doesn't report token usage. `Done.usage` must stay `None` in that
+    /// case so the loop's usage guard skips it — emitting a zero-usage
+    /// event would dilute the session cache-hit ratio with empty turns.
+    #[tokio::test]
+    async fn final_response_with_unreported_usage_stays_none() {
+        #[derive(Clone, Debug)]
+        struct NoUsageResponse;
+        impl GetTokenUsage for NoUsageResponse {
+            fn token_usage(&self) -> rig::completion::Usage {
+                rig::completion::Usage::default()
+            }
+        }
+
+        let raw: Pin<
+            Box<
+                dyn Stream<
+                        Item = Result<StreamedAssistantContent<NoUsageResponse>, CompletionError>,
+                    > + Send,
+            >,
+        > = Box::pin(futures::stream::iter(vec![
+            Ok(StreamedAssistantContent::Text(Text {
+                text: "hi".to_string(),
+                additional_params: None,
+            })),
+            Ok(StreamedAssistantContent::Final(NoUsageResponse)),
+        ]));
+
+        let events = drain(wrap_streamed_assistant(raw, None, None)).await;
+        let usage = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::Done { usage, .. } => Some(*usage),
+                _ => None,
+            })
+            .expect("a Done event");
+        assert!(
+            usage.is_none(),
+            "unreported (all-zeros) usage must map to None, got {usage:?}"
+        );
     }
 }
