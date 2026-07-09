@@ -4,6 +4,21 @@ All notable changes to dirge are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.4] - 2026-07-09
+
+### Fixed
+- A transient transport error ("error decoding response body", network blip,
+  rate-limit) arriving after the model had already streamed content killed the
+  whole run: the streamed partial was erased from the transcript (the turn
+  finalized with empty content), the run tore down to idle, and any steering
+  queued mid-run was dropped. The stream layer now preserves the last streamed
+  partial (text + thinking, with incomplete tool-call blocks stripped so they
+  don't orphan the `tool_use`), and the run loop treats a transient error as
+  recoverable — the partial stays in the transcript, a continue nudge drives
+  the next turn, a retry banner surfaces, and queued steering is delivered.
+  Bounded by three consecutive recoveries; explicit cancel and non-transient
+  errors (auth, context-length) still terminate as before (#626).
+
 ## [0.19.3] - 2026-07-08
 
 ### Added
