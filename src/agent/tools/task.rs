@@ -962,24 +962,28 @@ impl TaskTool {
                         Ok(root) => root,
                         Err(error) => {
                             let state = TaskState::Failed(error.to_string());
-                            let commits = crate::extras::git_worktree::worktree_commits_since(
-                                info,
-                                base_commit,
-                            )
-                            .unwrap_or_default();
-                            let dirty = crate::extras::git_worktree::worktree_is_dirty(info)
-                                .unwrap_or(true);
-                            let retained = dirty || !commits.is_empty();
-                            if !retained {
-                                let _ = crate::extras::git_worktree::remove_worktree_if_clean(info);
+                            #[cfg(feature = "git-worktree")]
+                            {
+                                let commits = crate::extras::git_worktree::worktree_commits_since(
+                                    info,
+                                    base_commit,
+                                )
+                                .unwrap_or_default();
+                                let dirty = crate::extras::git_worktree::worktree_is_dirty(info)
+                                    .unwrap_or(true);
+                                let retained = dirty || !commits.is_empty();
+                                if !retained {
+                                    let _ =
+                                        crate::extras::git_worktree::remove_worktree_if_clean(info);
+                                }
+                                store_for_task.set_coordinator_dispatch_worktree_outcome(
+                                    &tid_for_task,
+                                    commits,
+                                    dirty,
+                                    retained,
+                                );
+                                store_for_task.unregister_writer_worktree(&tid_for_task);
                             }
-                            store_for_task.set_coordinator_dispatch_worktree_outcome(
-                                &tid_for_task,
-                                commits,
-                                dirty,
-                                retained,
-                            );
-                            store_for_task.unregister_writer_worktree(&tid_for_task);
                             store_for_task.notify(&tid_for_task, state);
                             return;
                         }

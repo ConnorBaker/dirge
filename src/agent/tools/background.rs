@@ -1311,7 +1311,7 @@ mod tests {
 
         let out = prepend_pending_notifications("user msg", Some(&store));
         assert!(out.starts_with("<system-reminder>\n"));
-        assert!(out.contains("Task t1 (completed):"));
+        assert!(out.contains("[task t1] completed: the result"));
         assert!(out.contains("the result"));
         assert!(out.contains("</system-reminder>\n\n"));
         assert!(out.ends_with("user msg"));
@@ -1324,7 +1324,7 @@ mod tests {
         store.notify("t1", TaskState::Failed("kaboom".into()));
 
         let out = prepend_pending_notifications("user msg", Some(&store));
-        assert!(out.contains("Task t1 (failed):"));
+        assert!(out.contains("[task t1] failed: kaboom"));
         assert!(out.contains("kaboom"));
     }
 
@@ -1384,9 +1384,9 @@ mod tests {
         }
         let out = prepend_pending_notifications("msg", Some(&store));
         // FIFO order preserved.
-        let i0 = out.find("Task t0").unwrap();
-        let i1 = out.find("Task t1").unwrap();
-        let i2 = out.find("Task t2").unwrap();
+        let i0 = out.find("[task t0]").unwrap();
+        let i1 = out.find("[task t1]").unwrap();
+        let i2 = out.find("[task t2]").unwrap();
         assert!(i0 < i1 && i1 < i2);
     }
 

@@ -2,7 +2,6 @@ mod agent;
 mod auth;
 /// Shared spawn hardening (setsid + process-group SIGKILL guard) for the
 /// stdio child processes and bash subtrees.
-#[cfg(unix)]
 mod child_guard;
 mod cli;
 mod compression;
