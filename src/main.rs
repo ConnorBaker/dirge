@@ -1,8 +1,8 @@
 mod agent;
 mod auth;
 /// Shared spawn hardening (setsid + process-group SIGKILL guard) for the
-/// stdio child processes: LSP servers, DAP adapters, MCP command servers.
-#[cfg(any(feature = "lsp", feature = "dap", feature = "mcp"))]
+/// stdio child processes and bash subtrees.
+#[cfg(unix)]
 mod child_guard;
 mod cli;
 mod compression;

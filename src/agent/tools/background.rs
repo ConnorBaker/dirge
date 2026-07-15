@@ -80,6 +80,8 @@ struct Inner {
     /// this, subagents continued to consume API budget after their parent
     /// was gone, eventually notifying a dropped store.
     handles: HashMap<String, JoinHandle<()>>,
+    #[cfg(feature = "git-worktree")]
+    writer_worktrees: HashMap<String, crate::extras::git_worktree::WorktreeInfo>,
     coordinator: Option<CoordinatorState>,
 }
 
@@ -96,20 +98,28 @@ struct CoordinatorState {
 pub struct CoordinatorDispatchInfo {
     pub prompt: String,
     pub is_writer: bool,
+    pub is_isolated_writer: bool,
     pub retry_of: Option<String>,
     pub retried_by: Option<String>,
     pub worktree_branch: Option<String>,
     pub worktree_path: Option<String>,
+    pub worktree_commits: Vec<String>,
+    pub worktree_dirty: Option<bool>,
+    pub worktree_retained: Option<bool>,
 }
 
 #[derive(Debug)]
 struct CoordinatorDispatch {
     prompt: String,
     is_writer: bool,
+    is_isolated_writer: bool,
     retry_of: Option<String>,
     retried_by: Option<String>,
     worktree_branch: Option<String>,
     worktree_path: Option<String>,
+    worktree_commits: Vec<String>,
+    worktree_dirty: Option<bool>,
+    worktree_retained: Option<bool>,
 }
 
 impl CoordinatorState {
@@ -248,14 +258,49 @@ impl BackgroundStore {
         Some(CoordinatorDispatchInfo {
             prompt: dispatch.prompt.clone(),
             is_writer: dispatch.is_writer,
+            is_isolated_writer: dispatch.is_isolated_writer,
             retry_of: dispatch.retry_of.clone(),
             retried_by: dispatch.retried_by.clone(),
             worktree_branch: dispatch.worktree_branch.clone(),
             worktree_path: dispatch.worktree_path.clone(),
+            worktree_commits: dispatch.worktree_commits.clone(),
+            worktree_dirty: dispatch.worktree_dirty,
+            worktree_retained: dispatch.worktree_retained,
         })
     }
 
-    /// Record the persistent worktree allocated for a coordinator writer.
+    pub fn set_coordinator_dispatch_isolated(
+        &self,
+        id: &str,
+        is_isolated_writer: bool,
+    ) -> Result<(), String> {
+        let mut inner = self.lock();
+        let coordinator = inner
+            .coordinator
+            .as_mut()
+            .ok_or_else(|| "coordinator mode is not enabled".to_string())?;
+        if !is_isolated_writer
+            && coordinator
+                .active_task_ids
+                .iter()
+                .filter(|task_id| task_id.as_str() != id)
+                .any(|task_id| {
+                    coordinator
+                        .dispatches
+                        .get(task_id)
+                        .is_some_and(|dispatch| dispatch.is_writer && !dispatch.is_isolated_writer)
+                })
+        {
+            return Err("a serialized writer is already active; wait for batch reconciliation before dispatching another writer".into());
+        }
+        let dispatch = coordinator
+            .dispatches
+            .get_mut(id)
+            .ok_or_else(|| format!("task {id} is not a coordinator dispatch"))?;
+        dispatch.is_isolated_writer = is_isolated_writer;
+        Ok(())
+    }
+
     pub fn set_coordinator_dispatch_worktree(
         &self,
         id: &str,
@@ -273,6 +318,40 @@ impl BackgroundStore {
         Ok(())
     }
 
+    #[cfg(feature = "git-worktree")]
+    pub fn register_writer_worktree(
+        &self,
+        id: String,
+        info: crate::extras::git_worktree::WorktreeInfo,
+    ) {
+        self.lock().writer_worktrees.insert(id, info);
+    }
+
+    #[cfg(feature = "git-worktree")]
+    pub fn unregister_writer_worktree(&self, id: &str) {
+        self.lock().writer_worktrees.remove(id);
+    }
+
+    pub fn set_coordinator_dispatch_worktree_outcome(
+        &self,
+        id: &str,
+        commits: Vec<String>,
+        dirty: bool,
+        retained: bool,
+    ) {
+        let mut inner = self.lock();
+        let Some(dispatch) = inner
+            .coordinator
+            .as_mut()
+            .and_then(|coordinator| coordinator.dispatches.get_mut(id))
+        else {
+            return;
+        };
+        dispatch.worktree_commits = commits;
+        dispatch.worktree_dirty = Some(dirty);
+        dispatch.worktree_retained = Some(retained);
+    }
+
     pub fn insert_for_dispatch(&self, id: String) {
         if self.coordinator_strategy().is_some() {
             self.insert_coordinated(id);
@@ -286,6 +365,7 @@ impl BackgroundStore {
         id: String,
         prompt: String,
         is_writer: bool,
+        is_isolated_writer: bool,
         retry_of: Option<&str>,
     ) -> Result<(), String> {
         let mut inner = self.lock();
@@ -294,12 +374,13 @@ impl BackgroundStore {
         }
 
         if is_writer
+            && !is_isolated_writer
             && inner.coordinator.as_ref().is_some_and(|coordinator| {
                 coordinator.active_task_ids.iter().any(|task_id| {
                     coordinator
                         .dispatches
                         .get(task_id)
-                        .is_some_and(|dispatch| dispatch.is_writer)
+                        .is_some_and(|dispatch| dispatch.is_writer && !dispatch.is_isolated_writer)
                 })
             })
         {
@@ -352,10 +433,14 @@ impl BackgroundStore {
             CoordinatorDispatch {
                 prompt,
                 is_writer,
+                is_isolated_writer,
                 retry_of: retry_of.map(str::to_string),
                 retried_by: None,
                 worktree_branch: None,
                 worktree_path: None,
+                worktree_commits: Vec::new(),
+                worktree_dirty: None,
+                worktree_retained: None,
             },
         );
         Ok(())
@@ -484,6 +569,10 @@ impl BackgroundStore {
         // session; surfacing them in the next session's prompt would
         // be confusing ("you finished a task you didn't start").
         inner.pending.clear();
+        #[cfg(feature = "git-worktree")]
+        for (_, info) in std::mem::take(&mut inner.writer_worktrees) {
+            let _ = crate::extras::git_worktree::remove_worktree_if_clean(&info);
+        }
         inner.coordinator = None;
     }
 
@@ -663,11 +752,40 @@ pub fn followup_from_background_store(
                         } else if matches!(n.state, TaskState::Failed(_)) {
                             body.push_str("retry budget: 1/1 available\n");
                         }
+                        if dispatch.is_writer {
+                            body.push_str(&format!(
+                                "writer isolation: {}\n",
+                                if dispatch.is_isolated_writer {
+                                    "worktree"
+                                } else {
+                                    "serialized parent checkout"
+                                }
+                            ));
+                        }
                         if let Some(branch) = dispatch.worktree_branch {
                             body.push_str(&format!("writer branch: {branch}\n"));
                         }
+                        if let Some(dirty) = dispatch.worktree_dirty {
+                            body.push_str(&format!(
+                                "writer worktree: {}\n",
+                                if dirty {
+                                    "dirty; retained for salvage"
+                                } else {
+                                    "clean"
+                                }
+                            ));
+                        }
+                        if !dispatch.worktree_commits.is_empty() {
+                            body.push_str(&format!(
+                                "writer commits: {}\n",
+                                dispatch.worktree_commits.join(", ")
+                            ));
+                        }
                         if let Some(path) = dispatch.worktree_path {
-                            body.push_str(&format!("writer worktree retained: {path}\n"));
+                            body.push_str(&format!("writer salvage path: {path}\n"));
+                        }
+                        if dispatch.worktree_retained == Some(false) {
+                            body.push_str("writer worktree removed (clean with no commits)\n");
                         }
                     }
                     match &n.state {
@@ -794,13 +912,14 @@ mod tests {
         let store = BackgroundStore::new();
         store.enable_coordinator(crate::config::SubagentDispatchStrategy::Full);
         store
-            .insert_coordinator_dispatch("first".into(), "failed work".into(), false, None)
+            .insert_coordinator_dispatch("first".into(), "failed work".into(), false, false, None)
             .unwrap();
         store.notify("first", TaskState::Failed("boom".into()));
         store
             .insert_coordinator_dispatch(
                 "retry".into(),
                 "retry failed work".into(),
+                false,
                 false,
                 Some("first"),
             )
@@ -811,6 +930,7 @@ mod tests {
                 "second-retry".into(),
                 "retry again".into(),
                 false,
+                false,
                 Some("first"),
             )
             .unwrap_err();
@@ -818,18 +938,30 @@ mod tests {
     }
 
     #[test]
+    fn coordinator_allows_concurrent_isolated_writers() {
+        let store = BackgroundStore::new();
+        store.enable_coordinator(crate::config::SubagentDispatchStrategy::Full);
+        store
+            .insert_coordinator_dispatch("writer-one".into(), "edit one".into(), true, true, None)
+            .unwrap();
+        store
+            .insert_coordinator_dispatch("writer-two".into(), "edit two".into(), true, true, None)
+            .unwrap();
+    }
+
+    #[test]
     fn coordinator_serializes_writers_but_not_readers() {
         let store = BackgroundStore::new();
         store.enable_coordinator(crate::config::SubagentDispatchStrategy::Full);
         store
-            .insert_coordinator_dispatch("writer".into(), "edit code".into(), true, None)
+            .insert_coordinator_dispatch("writer".into(), "edit code".into(), true, false, None)
             .unwrap();
         store
-            .insert_coordinator_dispatch("reader".into(), "inspect code".into(), false, None)
+            .insert_coordinator_dispatch("reader".into(), "inspect code".into(), false, false, None)
             .unwrap();
 
         let error = store
-            .insert_coordinator_dispatch("writer-two".into(), "edit more".into(), true, None)
+            .insert_coordinator_dispatch("writer-two".into(), "edit more".into(), true, false, None)
             .unwrap_err();
         assert!(error.contains("serialized writer"));
     }
@@ -839,7 +971,7 @@ mod tests {
         let store = BackgroundStore::new();
         store.enable_coordinator(crate::config::SubagentDispatchStrategy::Full);
         store
-            .insert_coordinator_dispatch("writer".into(), "edit code".into(), true, None)
+            .insert_coordinator_dispatch("writer".into(), "edit code".into(), true, false, None)
             .unwrap();
 
         store

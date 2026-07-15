@@ -237,7 +237,11 @@ impl PermissionChecker {
                 // complex command as a prompt — not a head-rule allow — and
                 // never disagrees with enforcement (it used to miss heredocs).
                 "bash" | "shell" => {
-                    if crate::semantic::adapters::bash::command_is_complex(input) {
+                    #[cfg(feature = "semantic-bash")]
+                    let complex = crate::semantic::adapters::bash::command_is_complex(input);
+                    #[cfg(not(feature = "semantic-bash"))]
+                    let complex = crate::agent::tools::bash::check::coarse_complex_syntax(input);
+                    if complex {
                         Resource::command_complex(input)
                     } else {
                         Resource::command(input)

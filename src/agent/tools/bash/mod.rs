@@ -1,7 +1,7 @@
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 
-mod check;
+pub(crate) mod check;
 pub(crate) mod exec;
 use exec::spawn_streaming_shell;
 
