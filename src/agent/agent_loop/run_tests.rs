@@ -3041,7 +3041,8 @@ impl LoopTool for TypedPathTool {
         args: Value,
         _signal: AbortSignal,
         _on_update: LoopToolUpdate,
-    ) -> Pin<Box<dyn Future<Output = Result<super::super::LoopToolResult, String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<super::super::LoopToolResult, String>> + Send + 'a>>
+    {
         let executed = self.executed.clone();
         Box::pin(async move {
             executed.lock().unwrap().push(args.clone());
@@ -3076,7 +3077,10 @@ async fn scavenged_call_invalid_args_dropped() {
     // Second canned response: the loop must NOT reach this because
     // no continuation is forced after dropping the invalid scavenged
     // call. If this appears, the bug is still present.
-    let factory = canned_factory(vec![response, text_response("BUG-still-forcing-continuation")]);
+    let factory = canned_factory(vec![
+        response,
+        text_response("BUG-still-forcing-continuation"),
+    ]);
 
     let (tx, _rx) = mpsc::channel::<LoopEvent>(128);
     let config = build_config();

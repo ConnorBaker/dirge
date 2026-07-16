@@ -1905,10 +1905,7 @@ pub async fn run_loop(
                             // do NOT turn it into an error tool result that
                             // forces a continuation turn (duplicate-response
                             // bug). Native calls are never touched here.
-                            let tool = current_context
-                                .tools
-                                .iter()
-                                .find(|t| t.name() == sc.name);
+                            let tool = current_context.tools.iter().find(|t| t.name() == sc.name);
                             if let Some(tool) = tool {
                                 match crate::agent::agent_loop::tool_input_repair::validate_and_repair(
                                     tool.parameters(),
