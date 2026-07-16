@@ -660,7 +660,7 @@ async fn in_loop_compaction_refuses_anthropic_oauth_without_summarization_provid
                 crate::provider::anthropic_http::AnthropicHttpClient::new(
                     "sk-ant-oat-test".to_string(),
                 ),
-                llmtrim_core::ir::ProviderKind::Anthropic,
+                crate::llmtrim::ir::ProviderKind::Anthropic,
                 std::sync::Arc::new(crate::compression::dirge_default_config()),
                 true,
             ),
@@ -691,7 +691,7 @@ fn ui_compaction_refuses_anthropic_oauth_without_summarization_provider() {
                     crate::provider::anthropic_http::AnthropicHttpClient::new(
                         "sk-ant-oat-test".to_string(),
                     ),
-                    llmtrim_core::ir::ProviderKind::Anthropic,
+                    crate::llmtrim::ir::ProviderKind::Anthropic,
                     std::sync::Arc::new(crate::compression::dirge_default_config()),
                     true,
                 ),

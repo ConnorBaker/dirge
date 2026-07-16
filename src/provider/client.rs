@@ -141,7 +141,7 @@ where
     let client = openai::CompletionsClient::builder()
         .http_client(crate::provider::compressing_http::CompressingHttpClient::new(
             reqwest::Client::new(),
-            llmtrim_core::ir::ProviderKind::OpenAi,
+            crate::llmtrim::ir::ProviderKind::OpenAi,
             std::sync::Arc::new(
                 crate::compression::config_for_preset(&resolve_compression_preset()),
             ),
@@ -390,7 +390,7 @@ where
                 .http_client(
                     crate::provider::compressing_http::CompressingHttpClient::new(
                         codex_http_client_for(&key, bearer_is_dirge_oauth),
-                        llmtrim_core::ir::ProviderKind::OpenAi,
+                        crate::llmtrim::ir::ProviderKind::OpenAi,
                         std::sync::Arc::new(
                             crate::compression::config_for_preset(&resolve_compression_preset()),
                         ),
@@ -409,7 +409,7 @@ where
             let mut b = openai::CompletionsClient::builder()
                 .http_client(crate::provider::compressing_http::CompressingHttpClient::new(
                     reqwest::Client::new(),
-                    llmtrim_core::ir::ProviderKind::OpenAi,
+                    crate::llmtrim::ir::ProviderKind::OpenAi,
                     std::sync::Arc::new(
                         crate::compression::config_for_preset(&resolve_compression_preset()),
                     ),
@@ -453,7 +453,7 @@ where
                 };
                 let http = crate::provider::compressing_http::CompressingHttpClient::new(
                     http,
-                    llmtrim_core::ir::ProviderKind::Anthropic,
+                    crate::llmtrim::ir::ProviderKind::Anthropic,
                     std::sync::Arc::new(
                         crate::compression::config_for_preset(&resolve_compression_preset()),
                     ),
@@ -470,7 +470,7 @@ where
                     .http_client(
                         crate::provider::compressing_http::CompressingHttpClient::new(
                             reqwest::Client::new(),
-                            llmtrim_core::ir::ProviderKind::Anthropic,
+                            crate::llmtrim::ir::ProviderKind::Anthropic,
                             std::sync::Arc::new(
                                 crate::compression::config_for_preset(
                                     &resolve_compression_preset(),
@@ -491,7 +491,7 @@ where
                 .http_client(
                     crate::provider::compressing_http::CompressingHttpClient::new(
                         reqwest::Client::new(),
-                        llmtrim_core::ir::ProviderKind::Google,
+                        crate::llmtrim::ir::ProviderKind::Google,
                         std::sync::Arc::new(
                             crate::compression::config_for_preset(
                                 &resolve_compression_preset(),
@@ -509,7 +509,7 @@ where
             let b = openai::CompletionsClient::builder()
                 .http_client(crate::provider::compressing_http::CompressingHttpClient::new(
                     reqwest::Client::new(),
-                    llmtrim_core::ir::ProviderKind::OpenAi,
+                    crate::llmtrim::ir::ProviderKind::OpenAi,
                     std::sync::Arc::new(
                         crate::compression::config_for_preset(&resolve_compression_preset()),
                     ),
@@ -523,7 +523,7 @@ where
             let b = openai::CompletionsClient::builder()
                 .http_client(crate::provider::compressing_http::CompressingHttpClient::new(
                     reqwest::Client::new(),
-                    llmtrim_core::ir::ProviderKind::OpenAi,
+                    crate::llmtrim::ir::ProviderKind::OpenAi,
                     std::sync::Arc::new(
                         crate::compression::config_for_preset(&resolve_compression_preset()),
                     ),
@@ -541,7 +541,7 @@ where
                 .http_client(
                     crate::provider::compressing_http::CompressingHttpClient::new(
                         reqwest::Client::new(),
-                        llmtrim_core::ir::ProviderKind::OpenAi,
+                        crate::llmtrim::ir::ProviderKind::OpenAi,
                         std::sync::Arc::new(
                             crate::compression::config_for_preset(
                                 &resolve_compression_preset(),
@@ -561,7 +561,7 @@ where
                 .http_client(
                     crate::provider::compressing_http::CompressingHttpClient::new(
                         reqwest::Client::new(),
-                        llmtrim_core::ir::ProviderKind::OpenAi,
+                        crate::llmtrim::ir::ProviderKind::OpenAi,
                         std::sync::Arc::new(
                             crate::compression::config_for_preset(
                                 &resolve_compression_preset(),
@@ -581,7 +581,7 @@ where
                 .http_client(
                     crate::provider::compressing_http::CompressingHttpClient::new(
                         reqwest::Client::new(),
-                        llmtrim_core::ir::ProviderKind::OpenAi,
+                        crate::llmtrim::ir::ProviderKind::OpenAi,
                         std::sync::Arc::new(
                             crate::compression::config_for_preset(
                                 &resolve_compression_preset(),
@@ -605,7 +605,7 @@ where
                 .http_client(
                     crate::provider::compressing_http::CompressingHttpClient::new(
                         reqwest::Client::new(),
-                        llmtrim_core::ir::ProviderKind::OpenAi,
+                        crate::llmtrim::ir::ProviderKind::OpenAi,
                         std::sync::Arc::new(
                             crate::compression::config_for_preset(
                                 &resolve_compression_preset(),
@@ -878,16 +878,23 @@ fn current_epoch_ms() -> i64 {
 /// Resolve `enabled` for the compression interceptor. Config defaults to
 /// on; `DIRGE_COMPRESSION=0` or `DIRGE_COMPRESSION=off` disables at runtime.
 fn resolve_compression_enabled() -> bool {
-    !matches!(
-        std::env::var("DIRGE_COMPRESSION").as_deref(),
-        Ok("0") | Ok("off") | Ok("OFF")
-    )
+    // Env var takes absolute precedence (case-insensitive boolean-disable
+    // spellings). If unset, fall back to the [compression] config section
+    // loaded at startup.
+    match std::env::var("DIRGE_COMPRESSION") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "false" | "no" | "disabled"
+        ),
+        Err(_) => crate::compression::configured_enabled(),
+    }
 }
 
-/// Resolve the compression preset name. Defaults to "dirge";
-/// `DIRGE_COMPRESSION_PRESET` overrides.
+/// Resolve the compression preset name. `DIRGE_COMPRESSION_PRESET` overrides
+/// the config-file preset (which itself defaults to "dirge").
 fn resolve_compression_preset() -> String {
-    std::env::var("DIRGE_COMPRESSION_PRESET").unwrap_or_else(|_| "dirge".to_string())
+    std::env::var("DIRGE_COMPRESSION_PRESET")
+        .unwrap_or_else(|_| crate::compression::configured_preset())
 }
 
 #[cfg(test)]

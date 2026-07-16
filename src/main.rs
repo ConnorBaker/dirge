@@ -9,6 +9,8 @@ mod config;
 mod context;
 #[cfg(feature = "compression")]
 mod compression;
+#[cfg(feature = "compression")]
+mod llmtrim;
 #[cfg(feature = "dap")]
 mod dap;
 mod event;
@@ -538,6 +540,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let cfg = config::load();
+
+    #[cfg(feature = "compression")]
+    crate::compression::init_from_config(
+        cfg.compression.as_ref().and_then(|c| c.enabled),
+        cfg.compression.as_ref().and_then(|c| c.preset.clone()),
+    );
 
     // Handle subcommands that exit before the TUI starts.
     if let Some(ref command) = cli.command {

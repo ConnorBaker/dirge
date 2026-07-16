@@ -13,9 +13,9 @@ pub(crate) struct CompressingHttpClient<Inner> {
     inner: Inner,
     enabled: bool,
     #[cfg(feature = "compression")]
-    provider: llmtrim_core::ir::ProviderKind,
+    provider: crate::llmtrim::ir::ProviderKind,
     #[cfg(feature = "compression")]
-    config: std::sync::Arc<llmtrim_core::config::DenseConfig>,
+    config: std::sync::Arc<crate::llmtrim::config::DenseConfig>,
 }
 
 impl<Inner: Default> Default for CompressingHttpClient<Inner> {
@@ -25,7 +25,7 @@ impl<Inner: Default> Default for CompressingHttpClient<Inner> {
             Self {
                 inner: Inner::default(),
                 enabled: true,
-                provider: llmtrim_core::ir::ProviderKind::OpenAi,
+                provider: crate::llmtrim::ir::ProviderKind::OpenAi,
                 config: std::sync::Arc::new(
                     crate::compression::dirge_default_config(),
                 ),
@@ -55,8 +55,8 @@ impl<Inner> CompressingHttpClient<Inner> {
     #[allow(unused_variables)]
     pub fn new(
         inner: Inner,
-        #[cfg(feature = "compression")] provider: llmtrim_core::ir::ProviderKind,
-        #[cfg(feature = "compression")] config: std::sync::Arc<llmtrim_core::config::DenseConfig>,
+        #[cfg(feature = "compression")] provider: crate::llmtrim::ir::ProviderKind,
+        #[cfg(feature = "compression")] config: std::sync::Arc<crate::llmtrim::config::DenseConfig>,
         #[cfg(feature = "compression")] enabled: bool,
     ) -> Self {
         Self {

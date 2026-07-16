@@ -1332,15 +1332,18 @@ dependencies = [
  "anyhow",
  "async-stream",
  "base64",
+ "bm25",
  "bytes",
  "chrono",
  "clap",
  "compact_str",
  "crossterm",
+ "csv",
  "dap",
  "dirs",
  "dunce",
  "futures",
+ "gaoya",
  "hex",
  "html2text",
  "http",
@@ -1351,10 +1354,10 @@ dependencies = [
  "jsonschema",
  "libc",
  "libkrun-sys",
- "llmtrim-core",
  "lsp-types",
  "notify-rust",
  "nucleo-matcher",
+ "once_cell",
  "pulldown-cmark",
  "ratatui",
  "regex",
@@ -1368,10 +1371,13 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "smallvec 1.15.2",
+ "stop-words 0.10.0",
  "streaming-iterator",
  "sysinfo",
  "thiserror 2.0.18",
  "tokio",
+ "toml",
+ "toon-format",
  "tracing",
  "tracing-subscriber",
  "tree-sitter",
@@ -1388,10 +1394,13 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-sequel",
  "tree-sitter-typescript",
+ "unicode-normalization",
+ "unicode-segmentation",
  "unicode-width",
  "url",
  "uuid",
  "vt100",
+ "whatlang",
  "which",
  "yaml-rust2",
 ]
@@ -2869,27 +2878,6 @@ name = "litrs"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
-
-[[package]]
-name = "llmtrim-core"
-version = "0.11.1"
-dependencies = [
- "anyhow",
- "base64",
- "bm25",
- "csv",
- "gaoya",
- "once_cell",
- "regex",
- "serde",
- "serde_json",
- "stop-words 0.10.0",
- "toml",
- "toon-format",
- "unicode-normalization",
- "unicode-segmentation",
- "whatlang",
-]
 
 [[package]]
 name = "lock_api"

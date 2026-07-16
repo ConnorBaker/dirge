@@ -438,9 +438,12 @@ pub struct PluginSettings {
 
 /// Prompt-compression engine config. Disabled → no compression. Enabled with
 /// no preset → the "dirge" default (lossless transforms + tool-output
-/// windowing, no output-shaping). Runtime env: `DIRGE_COMPRESSION=0` or `off`
-/// disables regardless of this setting; `DIRGE_COMPRESSION_PRESET` overrides
-/// the preset name.
+/// windowing, no output-shaping). Other presets (e.g. `"agent"`,
+/// `"aggressive"`, `"auto"`, `"rag"`, `"code"`) enable lossy stages AND
+/// output-shaping directives that alter the model's output — they are an
+/// opt-in escape hatch, not a tuning knob. Runtime env: `DIRGE_COMPRESSION=0`
+/// or `off` disables regardless of this setting; `DIRGE_COMPRESSION_PRESET`
+/// overrides the preset name.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Compression {
