@@ -243,6 +243,10 @@ fn spawn_abort_watcher(
 struct SubagentCleanup {
     id: String,
     watcher: Option<tokio::task::JoinHandle<()>>,
+    /// When set, `Drop` calls `notify_if_running` with a Failed state so a
+    /// panic / early-return in the spawned closure doesn't leave the task
+    /// stuck Running forever (which would stall the coordinator batch barrier).
+    store: Option<BackgroundStore>,
 }
 
 impl SubagentCleanup {
@@ -250,6 +254,30 @@ impl SubagentCleanup {
         Self {
             id,
             watcher: Some(watcher),
+            store: None,
+        }
+    }
+
+    fn with_store(
+        id: String,
+        watcher: tokio::task::JoinHandle<()>,
+        store: BackgroundStore,
+    ) -> Self {
+        Self {
+            id,
+            watcher: Some(watcher),
+            store: Some(store),
+        }
+    }
+
+    /// Drop-guard for a spawned closure that has no abort-watcher.
+    /// Only carries the store so `Drop` can call `notify_if_running`
+    /// on a panic / early-return.
+    fn from_store(id: String, store: BackgroundStore) -> Self {
+        Self {
+            id,
+            watcher: None,
+            store: Some(store),
         }
     }
 }
@@ -260,6 +288,12 @@ impl Drop for SubagentCleanup {
             watcher.abort();
         }
         unregister_subagent_abort(&self.id);
+        if let Some(store) = &self.store {
+            store.notify_if_running(
+                &self.id,
+                TaskState::Failed("subagent exited without producing a result".into()),
+            );
+        }
     }
 }
 
@@ -1022,7 +1056,11 @@ impl TaskTool {
                     runner.task.abort_handle(),
                     runner.cancel_tx.clone(),
                 );
-                let _cleanup = SubagentCleanup::new(tid_for_task.clone(), abort_watcher);
+                let _cleanup = SubagentCleanup::with_store(
+                    tid_for_task.clone(),
+                    abort_watcher,
+                    store_for_task.clone(),
+                );
                 let chat_sink_drain = chat_sink.clone();
                 let emit = move |ev: SubagentChatEvent| {
                     if let Some(sink) = &chat_sink_drain {
@@ -1428,6 +1466,8 @@ impl Tool for TaskTool {
             let store_for_task = store.clone();
             let tid_for_task = tid.clone();
             let handle = tokio::spawn(async move {
+                let _cleanup =
+                    SubagentCleanup::from_store(tid_for_task.clone(), store_for_task.clone());
                 let fut = model.btw_query_with(
                     format!(
                         "You are a subagent working on a specific subtask. Complete it thoroughly.\n\nTask: {}",

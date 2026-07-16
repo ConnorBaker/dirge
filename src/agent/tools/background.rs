@@ -122,6 +122,15 @@ struct CoordinatorDispatch {
     worktree_retained: Option<bool>,
 }
 
+/// A writer worktree that was left on disk because it contains
+/// uncommitted or dirty work. Surfaced by `cancel_all` so the user
+/// can find their salvaged work after a session swap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedWorktree {
+    pub branch: Option<String>,
+    pub path: Option<String>,
+}
+
 impl CoordinatorState {
     fn new(
         strategy: SubagentDispatchStrategy,
@@ -521,16 +530,53 @@ impl BackgroundStore {
         }
     }
 
+    /// Notify the task to a terminal state ONLY if it is currently
+    /// `Running`. If the task already reached a terminal state
+    /// (via explicit `notify`), this call is a no-op — it won't
+    /// clobber the real result or re-enqueue a duplicate notification.
+    /// Used by drop guards to catch panics / early-returns in spawned
+    /// closures without overwriting a successful completion.
+    pub fn notify_if_running(&self, id: &str, state: TaskState) {
+        if matches!(state, TaskState::Running) {
+            // Refuse to "transition" Running → Running.
+            return;
+        }
+        let inner = self.lock();
+        let task_is_running = inner
+            .tasks
+            .get(id)
+            .is_some_and(|t| matches!(t.state, TaskState::Running));
+        if !task_is_running {
+            return;
+        }
+        // Delegate to normal notify — it already handles truncation,
+        // handle removal, pending queue, and UI event. Since we've
+        // verified the state is still Running, this is the only path
+        // that will fire.
+        drop(inner);
+        self.notify(id, state);
+    }
+
     /// Attach the `JoinHandle` of a freshly-spawned background subagent
     /// task to its id. Called immediately after the spawn in
     /// `task.rs` so `cancel_all` has something to abort on session
-    /// switch. Re-attaching for an id whose task already completed
-    /// (handle removed by `notify`) is a no-op; re-attaching for a
-    /// still-running id replaces and drops the previous handle.
+    /// switch. Only attaches when the task is still `Running` — if the
+    /// spawned closure already finished (called `notify` from another
+    /// thread) the state is terminal and the handle is dropped.
+    /// Re-attaching for a still-running id replaces and drops the
+    /// previous handle.
     pub fn attach_handle(&self, id: &str, handle: JoinHandle<()>) {
         let mut inner = self.lock();
-        // Only keep the handle if the task is still tracked.
-        if !inner.tasks.contains_key(id) {
+        // Only keep the handle if the task is still tracked AND still
+        // Running. On a multi-thread runtime the spawned closure can
+        // race ahead and finish (notify) before we get here — the task
+        // entry lives in `tasks` even post-notify (for task_status
+        // lookup), so `contains_key` alone isn't enough.
+        let is_running = inner
+            .tasks
+            .get(id)
+            .is_some_and(|t| matches!(t.state, TaskState::Running));
+        if !is_running {
             return;
         }
         if let Some(prev) = inner.handles.insert(id.to_string(), handle) {
@@ -549,7 +595,12 @@ impl BackgroundStore {
     /// parent agent no longer sees. Drained `pending` notifications
     /// are also cleared — they belong to the previous session and
     /// would otherwise surface in the new session's first turn.
-    pub fn cancel_all(&self) {
+    ///
+    /// Returns a list of writer worktrees that were *retained* on disk
+    /// (dirty or have uncommitted work) so the caller can surface their
+    /// paths to the user — otherwise the coordinator metadata would be
+    /// lost and the user would have orphaned `dirge-task-*` worktrees.
+    pub fn cancel_all(&self) -> Vec<RetainedWorktree> {
         let mut inner = self.lock();
         // Abort handles. `abort()` is best-effort: the awaiter inside
         // the task (e.g. `model.btw_query`) gets dropped at the next
@@ -574,7 +625,35 @@ impl BackgroundStore {
         for (_, info) in std::mem::take(&mut inner.writer_worktrees) {
             let _ = crate::extras::git_worktree::remove_worktree_if_clean(&info);
         }
+        // Collect retained writer worktrees BEFORE dropping the
+        // coordinator so we can tell the user where their salvaged
+        // work lives. remove_worktree_if_clean leaves dirty/committed
+        // worktrees on disk — without this metadata the user gets
+        // orphaned `dirge-task-*` dirs with no report.
+        let retained = if let Some(coordinator) = &inner.coordinator {
+            let retained: Vec<RetainedWorktree> = coordinator
+                .dispatches
+                .values()
+                .filter(|d| d.is_writer && d.worktree_retained == Some(true))
+                .map(|d| RetainedWorktree {
+                    branch: d.worktree_branch.clone(),
+                    path: d.worktree_path.clone(),
+                })
+                .collect();
+            for r in &retained {
+                tracing::warn!(
+                    target: "dirge::subagent",
+                    branch = ?r.branch,
+                    path = ?r.path,
+                    "retained writer worktree after cancel — uncommitted work preserved on disk",
+                );
+            }
+            retained
+        } else {
+            Vec::new()
+        };
         inner.coordinator = None;
+        retained
     }
 
     /// Fire a Started lifecycle event for the UI. No effect on the LLM-side
@@ -1019,6 +1098,81 @@ mod tests {
         assert!(BackgroundStore::new().get("nope").is_none());
     }
 
+    /// C1: `attach_handle` after terminal notify must NOT leak a
+    /// phantom "running" slot into `handles` — the spawned-closure
+    /// can race ahead on a multi-thread runtime and finish (notify)
+    /// BEFORE the parent calls `attach_handle`. Only Running tasks
+    /// get their handle tracked; a terminal task drops the handle.
+    #[tokio::test]
+    async fn attach_handle_after_terminal_notify_is_noop() {
+        let store = BackgroundStore::new();
+        store.insert("t1".into());
+
+        // Simulate the spawned task finishing first.
+        store.notify("t1", TaskState::Completed("done".into()));
+        assert_eq!(store.running_count(), 0, "notify removes from handles");
+
+        // Now attach happens — task exists but is Completed, so
+        // attach must NOT insert the handle.
+        let dummy_handle = tokio::spawn(async {});
+        store.attach_handle("t1", dummy_handle);
+        assert_eq!(
+            store.running_count(),
+            0,
+            "attach_handle after terminal notify must not leak"
+        );
+
+        // Normal case: attach while Running → handle tracked.
+        store.insert("t2".into());
+        assert_eq!(store.get("t2").unwrap().state, TaskState::Running);
+        let handle2 = tokio::spawn(async {});
+        store.attach_handle("t2", handle2);
+        assert_eq!(
+            store.running_count(),
+            1,
+            "attach on Running must track handle"
+        );
+    }
+
+    /// C2: `notify_if_running` transitions a Running task to terminal
+    /// but is a no-op when the task is already terminal (so the drop
+    /// guard can't clobber a real result).
+    #[test]
+    fn notify_if_running_guards_against_clobber() {
+        let store = BackgroundStore::new();
+
+        // notify_if_running on Running task → transitions.
+        store.insert("t1".into());
+        store.notify_if_running("t1", TaskState::Failed("early exit".into()));
+        assert_eq!(
+            store.get("t1").unwrap().state,
+            TaskState::Failed("early exit".into()),
+            "notify_if_running must transition Running → Failed"
+        );
+
+        // notify_if_running on terminal task → no-op.
+        store.insert("t2".into());
+        store.notify("t2", TaskState::Completed("real result".into()));
+        store.notify_if_running("t2", TaskState::Failed("late bump".into()));
+        assert_eq!(
+            store.get("t2").unwrap().state,
+            TaskState::Completed("real result".into()),
+            "notify_if_running on terminal task must not clobber"
+        );
+
+        // notify_if_running with Running state is refused.
+        store.insert("t3".into());
+        store.notify_if_running("t3", TaskState::Running);
+        assert_eq!(
+            store.get("t3").unwrap().state,
+            TaskState::Running,
+            "notify_if_running with Running must be a no-op"
+        );
+
+        // notify_if_running on missing id → no-op (no panic).
+        store.notify_if_running("ghost", TaskState::Failed("nope".into()));
+    }
+
     /// Audit C6: `cancel_all` must abort in-flight handles, mark
     /// Running tasks as Failed("cancelled"), and clear pending
     /// notifications so the next session doesn't inherit them.
@@ -1063,6 +1217,60 @@ mod tests {
 
         // Give the runtime a tick so the abort lands.
         tokio::task::yield_now().await;
+    }
+
+    /// C3: `cancel_all` collects and returns retained writer worktree
+    /// metadata BEFORE dropping the coordinator, so the user can find
+    /// their salvaged work instead of orphaned `dirge-task-*` dirs.
+    #[test]
+    fn cancel_all_reports_retained_worktrees() {
+        let store = BackgroundStore::new();
+        store.enable_coordinator(crate::config::SubagentDispatchStrategy::Full);
+
+        // Seed a writer dispatch with a retained worktree.
+        store
+            .insert_coordinator_dispatch("w1".into(), "edit".into(), true, false, None)
+            .unwrap();
+        store
+            .set_coordinator_dispatch_worktree(
+                "w1",
+                "dirge-task-w1".into(),
+                "/tmp/dirge-task-w1".into(),
+            )
+            .unwrap();
+        store.set_coordinator_dispatch_worktree_outcome(
+            "w1",
+            vec!["abc123".into()],
+            true, // dirty
+            true, // retained
+        );
+
+        let retained = store.cancel_all();
+        assert_eq!(
+            retained.len(),
+            1,
+            "retained writer worktree must be reported"
+        );
+        assert_eq!(retained[0].branch.as_deref(), Some("dirge-task-w1"));
+        assert_eq!(retained[0].path.as_deref(), Some("/tmp/dirge-task-w1"));
+    }
+
+    /// C3: non-writer and non-retained dispatches must NOT appear in cancel_all output.
+    #[test]
+    fn cancel_all_omits_non_retained_and_readers() {
+        let store = BackgroundStore::new();
+        store.enable_coordinator(crate::config::SubagentDispatchStrategy::Full);
+
+        // READER: non-writer — must not appear.
+        store
+            .insert_coordinator_dispatch("r1".into(), "read".into(), false, false, None)
+            .unwrap();
+
+        let retained = store.cancel_all();
+        assert!(
+            retained.is_empty(),
+            "non-writer dispatches must not appear in retained list"
+        );
     }
 
     // Regression: previously get() evicted completed/failed tasks. The new
