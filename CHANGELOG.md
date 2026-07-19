@@ -4,6 +4,17 @@ All notable changes to dirge are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.17] - 2026-07-18
+
+### Fixed
+- Provider usage-cap 429s (e.g. GLM/Zhipu's 5-hour limit, error code 1308) are no
+  longer retried as transient rate-limits. Their quota resets hours out while
+  backoff caps at 5 minutes, so retrying only re-hit the cap, burned the retry
+  budget, and killed the run mid-task. They're now classified as a non-retryable
+  usage cap; headless surfaces it as a distinct, resumable outcome (envelope
+  subtype `error_usage_cap`) that prints the reset time and a `--continue` hint,
+  with the session already saved (#689).
+
 ## [0.19.16] - 2026-07-18
 
 ### Added
